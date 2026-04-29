@@ -1,0 +1,71 @@
+- name: Add RAC interconnect NICs to Oracle RAC nodes
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vcenter_hostname: "vcenter.example.com"
+    vcenter_username: "administrator@vsphere.local"
+    vcenter_password: "{{ vault_vcenter_password }}"
+    datacenter: "DC01"
+    rac_nodes:
+      - name: "rac-node1"
+        interconnect_ip: "192.168.10.11"
+        backup_interconnect_ip: "192.168.11.11"
+      - name: "rac-node2"
+        interconnect_ip: "192.168.10.12"
+        backup_interconnect_ip: "192.168.11.12"
+    # Your private portgroups on the vCenter private switch
+    interconnect_portgroup: "RAC-Interconnect-PG"
+    backup_interconnect_portgroup: "RAC-Backup-Interconnect-PG"
+
+  tasks:
+    - name: Add primary RAC interconnect NIC
+      community.vmware.vmware_guest_network:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        name: "{{ item.name }}"
+        networks:
+          - name: "{{ interconnect_portgroup }}"
+            device_type: vmxnet3          # Best performance for RAC interconnect
+            connected: true
+            start_connected: true
+            state: present
+      loop: "{{ rac_nodes }}"
+
+    - name: Add secondary/backup RAC interconnect NIC
+      community.vmware.vmware_guest_network:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        name: "{{ item.name }}"
+        networks:
+          - name: "{{ backup_interconnect_portgroup }}"
+            device_type: vmxnet3
+            connected: true
+            start_connected: true
+            state: present
+      loop: "{{ rac_nodes }}"
+
+
+
+
+
+      - name: Gather VM network info to confirm NICs added
+      community.vmware.vmware_guest_network:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        name: "{{ item.name }}"
+        gather_network_info: true
+      loop: "{{ rac_nodes }}"
+      register: nic_info
+
+    - name: Debug NIC assignments
+      debug:
+        var: nic_info
