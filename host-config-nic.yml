@@ -1,0 +1,80 @@
+- name: Configure RAC interconnect network interfaces
+  hosts: rac_nodes
+  become: true
+  vars:
+    interconnect_portgroup: "RAC-Interconnect-PG"
+    backup_interconnect_portgroup: "RAC-Backup-Interconnect-PG"
+
+  tasks:
+    # --- Discover which NIC belongs to which portgroup via MAC ---
+    - name: Gather VMware guest info (run from localhost delegation)
+      community.vmware.vmware_guest_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        name: "{{ inventory_hostname }}"
+      delegate_to: localhost
+      register: vm_guest_info
+
+    - name: Build MAC-to-portgroup mapping
+      set_fact:
+        interconnect_mac: >-
+          {{ vm_guest_info.instance.hw_interfaces
+             | selectattr('portgroup_portgroupname', 'equalto', interconnect_portgroup)
+             | map(attribute='macaddress') | first | lower }}
+        backup_interconnect_mac: >-
+          {{ vm_guest_info.instance.hw_interfaces
+             | selectattr('portgroup_portgroupname', 'equalto', backup_interconnect_portgroup)
+             | map(attribute='macaddress') | first | lower }}
+
+    - name: Match MAC to OS interface name
+      set_fact:
+        interconnect_iface: >-
+          {{ ansible_interfaces
+             | map('regex_replace', '^', 'ansible_')
+             | map('extract', hostvars[inventory_hostname])
+             | selectattr('macaddress', 'defined')
+             | selectattr('macaddress', 'equalto', interconnect_mac)
+             | map(attribute='device') | first }}
+        backup_interconnect_iface: >-
+          {{ ansible_interfaces
+             | map('regex_replace', '^', 'ansible_')
+             | map('extract', hostvars[inventory_hostname])
+             | selectattr('macaddress', 'defined')
+             | selectattr('macaddress', 'equalto', backup_interconnect_mac)
+             | map(attribute='device') | first }}
+
+    # --- Configure primary interconnect ---
+    - name: Configure primary RAC interconnect interface
+      community.general.nmcli:
+        conn_name: "rac-interconnect"
+        ifname: "{{ interconnect_iface }}"
+        type: ethernet
+        ip4: "{{ interconnect_ip }}/{{ interconnect_prefix }}"
+        gw4: ""                            # No gateway - private interconnect
+        dns4: []                           # No DNS on interconnect
+        autoconnect: true
+        state: present
+      notify: Bring up interconnect
+
+    # --- Configure backup interconnect ---
+    - name: Configure backup RAC interconnect interface
+      community.general.nmcli:
+        conn_name: "rac-backup-interconnect"
+        ifname: "{{ backup_interconnect_iface }}"
+        type: ethernet
+        ip4: "{{ backup_interconnect_ip }}/{{ backup_interconnect_prefix }}"
+        gw4: ""
+        dns4: []
+        autoconnect: true
+        state: present
+      notify: Bring up backup interconnect
+
+  handlers:
+    - name: Bring up interconnect
+      command: nmcli con up rac-interconnect
+
+    - name: Bring up backup interconnect
+      command: nmcli con up rac-backup-interconnect
