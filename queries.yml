@@ -1,0 +1,120 @@
+groups:
+  - name: bcm_infrastructure_alerts
+    interval: 30s
+    rules:
+      # Alert if PostgreSQL host goes down
+      - alert: PostgreSQLHostDown
+        expr: up{job="postgresql"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: postgresql
+        annotations:
+          summary: "PostgreSQL host {{ $labels.instance }} is down"
+          description: "PostgreSQL instance {{ $labels.instance }} has been down for more than 1 minute."
+
+      # Alert if Patroni leader has changed
+      - alert: PatroniLeaderChanged
+        expr: changes(patroni_master{scope="postgres"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          component: patroni
+        annotations:
+          summary: "Patroni leader has changed"
+          description: "Patroni cluster {{ $labels.scope }} has experienced a leader change in the last 5 minutes."
+
+      # Alternative Patroni leader change detection
+      - alert: PatroniLeaderChanged
+        expr: |
+          (patroni_patroni_info{role="master"} offset 5m) 
+          unless 
+          (patroni_patroni_info{role="master"})
+        for: 0m
+        labels:
+          severity: warning
+          component: patroni
+        annotations:
+          summary: "Patroni leader has changed"
+          description: "The Patroni master role has moved to a different node."
+
+      # Alert if HAProxy is down
+      - alert: HAProxyDown
+        expr: up{job="haproxy"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: haproxy
+        annotations:
+          summary: "HAProxy {{ $labels.instance }} is down"
+          description: "HAProxy instance {{ $labels.instance }} has been unreachable for more than 1 minute."
+
+      # Alert if etcd cluster is completely down
+      - alert: EtcdClusterDown
+        expr: up{job="etcd"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: etcd
+        annotations:
+          summary: "etcd cluster is completely down"
+          description: "All etcd instances are down. No etcd endpoints are reachable."
+
+      # Alternative: etcd cluster has no healthy members
+      - alert: EtcdClusterDown
+        expr: sum(up{job="etcd"}) == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: etcd
+        annotations:
+          summary: "etcd cluster has no healthy members"
+          description: "The entire etcd cluster is down - no healthy members available."
+
+      # Alert if full backup is older than 8 days (1 week + 1 day epsilon)
+      - alert: FullBackupTooOld
+        expr: (time() - pg_backup_last_full_backup_time) > (8 * 24 * 3600)
+        for: 10m
+        labels:
+          severity: critical
+          component: backup
+          backup_type: full
+        annotations:
+          summary: "Full backup is older than 8 days"
+          description: "The last full backup was taken {{ $value | humanizeDuration }} ago, exceeding the 8-day threshold (7 days + 1 day epsilon)."
+
+      # Alternative if you have a different metric name
+      - alert: FullBackupTooOld
+        expr: (time() - backup_last_success_timestamp{type="full"}) > (8 * 24 * 3600)
+        for: 10m
+        labels:
+          severity: critical
+          component: backup
+          backup_type: full
+        annotations:
+          summary: "Full backup is older than 8 days"
+          description: "Last successful full backup was {{ $value | humanizeDuration }} ago."
+
+      # Alert if incremental backup is older than 26 hours (1 day + 2 hours epsilon)
+      - alert: IncrementalBackupTooOld
+        expr: (time() - pg_backup_last_incremental_backup_time) > (26 * 3600)
+        for: 10m
+        labels:
+          severity: warning
+          component: backup
+          backup_type: incremental
+        annotations:
+          summary: "Incremental backup is older than 26 hours"
+          description: "The last incremental backup was taken {{ $value | humanizeDuration }} ago, exceeding the 26-hour threshold (24 hours + 2 hours epsilon)."
+
+      # Alternative if you have a different metric name
+      - alert: IncrementalBackupTooOld
+        expr: (time() - backup_last_success_timestamp{type="incremental"}) > (26 * 3600)
+        for: 10m
+        labels:
+          severity: warning
+          component: backup
+          backup_type: incremental
+        annotations:
+          summary: "Incremental backup is older than 26 hours"
+          description: "Last successful incremental backup was {{ $value | humanizeDuration }} ago."
