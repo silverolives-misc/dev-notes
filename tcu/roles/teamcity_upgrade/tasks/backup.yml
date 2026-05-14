@@ -1,0 +1,31 @@
+---
+- name: Gather date_time facts
+  ansible.builtin.setup:
+    gather_subset:
+      - date_time
+
+- name: Ensure backup directory exists
+  ansible.builtin.file:
+    path: "{{ teamcity_data_dir }}/backup"
+    state: directory
+    owner: "{{ teamcity_owner_user }}"
+    group: "{{ teamcity_owner_user }}"
+    mode: "0750"
+
+- name: Archive TeamCity data directory
+  # Backs up everything under teamcity_data_dir excluding the backup subdir itself.
+  # Service must be stopped before this runs to ensure a consistent snapshot.
+  ansible.builtin.archive:
+    path: "{{ teamcity_data_dir }}"
+    dest: "{{ teamcity_data_dir }}/backup/teamcity-data_{{ teamcity_current_version }}_{{ ansible_date_time.iso8601_basic_short }}.tar.gz"
+    format: gz
+    exclude_path:
+      - "{{ teamcity_data_dir }}/backup"
+    owner: "{{ teamcity_owner_user }}"
+    group: "{{ teamcity_owner_user }}"
+    mode: "0640"
+  register: _data_backup
+
+- name: Show backup location
+  ansible.builtin.debug:
+    msg: "Data backup: {{ _data_backup.dest }}"
