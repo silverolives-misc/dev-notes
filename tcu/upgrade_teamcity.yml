@@ -1,0 +1,11 @@
+---
+- name: Upgrade TeamCity
+  hosts: teamcity_servers
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - vars/teamcity_upgrade_vars.yml
+
+  roles:
+    - teamcity_upgrade

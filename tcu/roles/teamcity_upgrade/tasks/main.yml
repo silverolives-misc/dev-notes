@@ -1,0 +1,65 @@
+---
+- name: Assert required variables are set
+  ansible.builtin.assert:
+    that:
+      - teamcity_version | length > 0
+      - (artifactory_use_token and artifactory_token | length > 0)
+        or (not artifactory_use_token and artifactory_username | length > 0 and artifactory_password | length > 0)
+    fail_msg: "teamcity_version and Artifactory credentials must be provided."
+
+- name: Gather current TeamCity version
+  ansible.builtin.import_tasks: current_version.yml
+
+- name: Set upgrade needed flag
+  ansible.builtin.set_fact:
+    teamcity_upgrade_needed: "{{ teamcity_current_version != teamcity_version }}"
+
+- name: Skip — already on target version
+  ansible.builtin.debug:
+    msg: "TeamCity is already at {{ teamcity_version }}. Nothing to do."
+  when: not teamcity_upgrade_needed
+
+- name: Run upgrade
+  when: teamcity_upgrade_needed
+  block:
+    - name: Download tarball from Artifactory
+      ansible.builtin.import_tasks: download.yml
+
+    - name: Stop TeamCity service
+      ansible.builtin.systemd:
+        name: "{{ teamcity_systemd_service }}"
+        state: stopped
+        scope: user
+      async: "{{ teamcity_service_timeout }}"
+      poll: 5
+
+    - name: Install new TeamCity version
+      ansible.builtin.import_tasks: install.yml
+
+    - name: Update plugins
+      ansible.builtin.import_tasks: plugins.yml
+      when: teamcity_plugins | default([]) | length > 0
+
+    - name: Start TeamCity service
+      ansible.builtin.systemd:
+        name: "{{ teamcity_systemd_service }}"
+        state: started
+        enabled: true
+        scope: user
+
+    - name: Verify upgrade
+      ansible.builtin.import_tasks: verify.yml
+
+  rescue:
+    - name: Swing symlink back to previous version
+      ansible.builtin.import_tasks: restore.yml
+
+    - name: Restart TeamCity on previous version
+      ansible.builtin.systemd:
+        name: "{{ teamcity_systemd_service }}"
+        state: started
+        scope: user
+
+    - name: Fail with error
+      ansible.builtin.fail:
+        msg: "Upgrade to {{ teamcity_version }} failed. Rolled back to {{ teamcity_current_version }}."

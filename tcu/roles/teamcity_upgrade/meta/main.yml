@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: teamcity_upgrade
+  author: craig-if
+  description: Upgrade JetBrains TeamCity on RHEL from an Artifactory tarball
+  min_ansible_version: "2.14"
+  platforms:
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+  categories:
+    - system
+
+dependencies: []

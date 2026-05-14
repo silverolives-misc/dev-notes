@@ -1,0 +1,18 @@
+[Unit]
+Description=JetBrains TeamCity Build Server
+After=network.target
+
+[Service]
+Type=forking
+User={{ teamcity_user }}
+Group={{ teamcity_group }}
+ExecStart={{ teamcity_install_dir }}/bin/teamcity-server.sh start
+ExecStop={{ teamcity_install_dir }}/bin/teamcity-server.sh stop
+PIDFile={{ teamcity_install_dir }}/logs/catalina.pid
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec={{ teamcity_service_timeout }}
+TimeoutStopSec={{ teamcity_service_timeout }}
+
+[Install]
+WantedBy=multi-user.target

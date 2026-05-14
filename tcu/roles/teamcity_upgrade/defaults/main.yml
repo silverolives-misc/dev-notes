@@ -1,0 +1,45 @@
+---
+# Variable names intentionally match the existing 'teamcity' install role
+# so both roles can run in the same play without conflicts.
+
+# OS user — existing role receives this as {{ user }} from inventory/group_vars
+teamcity_owner_user: "{{ user }}"
+
+## Directories — mirror existing role exactly
+teamcity_app_dir: "{{ home }}/teamcity"
+teamcity_current_ver_dir: "{{ teamcity_app_dir }}/current/TeamCity"
+teamcity_bin_dir: "{{ teamcity_current_ver_dir }}/bin"
+teamcity_conf_dir: "{{ teamcity_current_ver_dir }}/conf"
+teamcity_logs_dir: "{{ teamcity_current_ver_dir }}/logs"
+teamcity_data_dir: "/home/{{ teamcity_owner_user }}/teamcity-data"
+
+# Version to upgrade TO
+teamcity_version: "2024.07.3"
+
+## Download — Artifactory URL matches existing role convention
+teamcity_artifact: "TeamCity-{{ teamcity_version }}.tar.gz"
+teamcity_download_url: >-
+teamcity_cleanup: true
+teamcity_validate_certs: true
+
+# Artifactory auth — use token (preferred) or username/password
+# Store values in ansible-vault
+artifactory_use_token: true
+artifactory_token: ""         # vault_artifactory_token
+artifactory_username: ""      # vault_artifactory_username (if not using token)
+artifactory_password: ""      # vault_artifactory_password (if not using token)
+
+## Systemd — matches existing role
+teamcity_systemd_service: "teamcity-server"
+
+## Upgrade-specific settings (not in the install role)
+teamcity_service_timeout: 180
+
+# Plugin list — same structure as the existing teamcity install role.
+# Each entry requires 'name' (prefix used for old-version cleanup) and 'url' (full Artifactory URL).
+# Leave empty if plugins are not managed by this role.
+# Example:
+#   teamcity_plugins:
+#     - name: loki-build-plugin-assemby
+#       url: https://artifactrepository.../loki-build-plugin-assemby-2.0.0.zip
+teamcity_plugins: []

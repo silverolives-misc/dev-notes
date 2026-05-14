@@ -1,0 +1,22 @@
+---
+# Rollback by swinging the symlink back — the old versioned directory was never touched.
+
+- name: Restore 'current' symlink to previous version
+  ansible.builtin.file:
+    src: "{{ teamcity_app_dir }}/{{ teamcity_current_version }}"
+    dest: "{{ teamcity_app_dir }}/current"
+    state: link
+    force: true
+    owner: "{{ teamcity_owner_user }}"
+    group: "{{ teamcity_owner_user }}"
+  when: teamcity_current_version != 'none'
+
+- name: Confirm rollback
+  ansible.builtin.debug:
+    msg: "Rolled back: current -> {{ teamcity_app_dir }}/{{ teamcity_current_version }}"
+  when: teamcity_current_version != 'none'
+
+- name: Warn — no previous version to restore to
+  ansible.builtin.debug:
+    msg: "WARNING: No previous version detected. Manual intervention required."
+  when: teamcity_current_version == 'none'

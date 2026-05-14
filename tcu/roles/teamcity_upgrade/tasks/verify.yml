@@ -1,0 +1,25 @@
+---
+- name: Wait for TeamCity to become available
+  ansible.builtin.uri:
+    url: "http://{{ teamcity_bind_addr }}:{{ teamcity_bind_port }}/login.html"
+    status_code: 200
+    validate_certs: false
+  register: _tc_health
+  retries: 30
+  delay: 10
+  until: _tc_health.status == 200
+
+- name: Resolve 'current' symlink after upgrade
+  ansible.builtin.command:
+    cmd: "readlink {{ teamcity_app_dir }}/current"
+  register: _tc_verify_link
+  changed_when: false
+
+- name: Assert symlink points to target version
+  ansible.builtin.assert:
+    that:
+      - _tc_verify_link.stdout | basename == teamcity_version
+    fail_msg: >-
+      Symlink mismatch after upgrade.
+      Expected {{ teamcity_version }}, got {{ _tc_verify_link.stdout | basename }}.
+    success_msg: "TeamCity successfully upgraded to {{ teamcity_version }}."

@@ -1,0 +1,30 @@
+---
+- name: Set Artifactory auth header (token)
+  ansible.builtin.set_fact:
+    _artifactory_headers:
+      X-JFrog-Art-Api: "{{ artifactory_token }}"
+  when: artifactory_use_token | bool
+
+- name: Set Artifactory auth header (username/password)
+  ansible.builtin.set_fact:
+    _artifactory_headers:
+      Authorization: "Basic {{ (artifactory_username ~ ':' ~ artifactory_password) | b64encode }}"
+  when: not artifactory_use_token | bool
+
+- name: Download TeamCity tarball from Artifactory
+  # get_url is idempotent — skips download if dest already exists.
+  # No manual stat guard needed.
+  ansible.builtin.get_url:
+    url: "{{ teamcity_download_url }}"
+    dest: "/tmp/{{ teamcity_artifact }}"
+    headers: "{{ _artifactory_headers }}"
+    validate_certs: "{{ teamcity_validate_certs }}"
+    mode: "0640"
+    owner: root
+    group: root
+    tmp_dest: "/tmp"
+
+- name: Verify tarball integrity
+  ansible.builtin.command:
+    cmd: "gzip -t /tmp/{{ teamcity_artifact }}"
+  changed_when: false

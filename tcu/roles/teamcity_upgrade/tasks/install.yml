@@ -1,0 +1,56 @@
+---
+# Target structure after install:
+#   {{ teamcity_app_dir }}/{{ teamcity_version }}/TeamCity/   <- extracted tarball
+#   {{ teamcity_app_dir }}/current                            <- symlink -> above
+
+- name: Create versioned install directory
+  ansible.builtin.file:
+    path: "{{ teamcity_app_dir }}/{{ teamcity_version }}"
+    state: directory
+    owner: "{{ teamcity_owner_user }}"
+    group: "{{ teamcity_owner_user }}"
+    mode: "0755"
+
+- name: Check if tarball has already been extracted
+  ansible.builtin.stat:
+    path: "{{ teamcity_app_dir }}/{{ teamcity_version }}/TeamCity"
+  register: _tc_extracted
+
+- name: Extract TeamCity tarball into versioned directory
+  # The tarball extracts as a 'TeamCity/' subdirectory — do NOT strip components.
+  # Result: {{ teamcity_app_dir }}/{{ teamcity_version }}/TeamCity/bin, conf, etc.
+  # Guarded by stat so a failed mid-run retry does not re-extract unnecessarily.
+  ansible.builtin.unarchive:
+    src: "/tmp/{{ teamcity_artifact }}"
+    dest: "{{ teamcity_app_dir }}/{{ teamcity_version }}"
+    remote_src: true
+    owner: "{{ teamcity_owner_user }}"
+    group: "{{ teamcity_owner_user }}"
+  when: not _tc_extracted.stat.exists
+
+- name: Ensure bin scripts are executable
+  ansible.builtin.find:
+    paths: "{{ teamcity_app_dir }}/{{ teamcity_version }}/TeamCity/bin"
+    patterns: "*.sh"
+  register: _bin_scripts
+
+- name: Set execute bit on bin scripts
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    mode: "0750"
+  loop: "{{ _bin_scripts.files }}"
+
+- name: Swing 'current' symlink to new version
+  ansible.builtin.file:
+    src: "{{ teamcity_app_dir }}/{{ teamcity_version }}"
+    dest: "{{ teamcity_app_dir }}/current"
+    state: link
+    force: true
+    owner: "{{ teamcity_owner_user }}"
+    group: "{{ teamcity_owner_user }}"
+
+- name: Remove downloaded tarball
+  ansible.builtin.file:
+    path: "/tmp/{{ teamcity_artifact }}"
+    state: absent
+  when: teamcity_cleanup | bool

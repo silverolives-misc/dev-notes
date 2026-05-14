@@ -1,0 +1,40 @@
+---
+# The install role creates:
+#   {{ teamcity_app_dir }}/{{ version }}/TeamCity/   <- versioned extract
+#   {{ teamcity_app_dir }}/current                   <- symlink -> above
+#
+# Reading the symlink target basename gives us the installed version directly.
+
+- name: Stat the 'current' symlink
+  ansible.builtin.stat:
+    path: "{{ teamcity_app_dir }}/current"
+    follow: false
+  register: _tc_symlink
+
+- name: Resolve symlink to get current version
+  ansible.builtin.command:
+    cmd: "readlink {{ teamcity_app_dir }}/current"
+  register: _tc_readlink
+  changed_when: false
+  when:
+    - _tc_symlink.stat.exists
+    - _tc_symlink.stat.islnk
+
+- name: Parse installed version from symlink target
+  ansible.builtin.set_fact:
+    # target is an absolute path like /home/mktsinfra/teamcity/2024.07.3
+    # basename gives the version string directly
+    teamcity_current_version: "{{ _tc_readlink.stdout | basename }}"
+  when:
+    - _tc_symlink.stat.exists
+    - _tc_symlink.stat.islnk
+    - _tc_readlink.stdout is defined
+
+- name: Set version to none when not installed
+  ansible.builtin.set_fact:
+    teamcity_current_version: "none"
+  when: not _tc_symlink.stat.exists or not _tc_symlink.stat.islnk
+
+- name: Show current TeamCity version
+  ansible.builtin.debug:
+    msg: "Installed: {{ teamcity_current_version }} | Target: {{ teamcity_version }}"

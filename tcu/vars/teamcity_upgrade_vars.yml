@@ -1,0 +1,15 @@
+---
+# Version to upgrade TO
+teamcity_version: "2024.12.1"
+
+# These are passed in from inventory/group_vars in the existing role —
+# define here only if running the upgrade role standalone
+# user: "mktsinfra"
+# home: "/home/mktsinfra"
+
+# Artifactory auth — store actual values in ansible-vault
+artifactory_use_token: true
+artifactory_token: "{{ vault_artifactory_token }}"
+
+# Backup
+teamcity_backup_enabled: true

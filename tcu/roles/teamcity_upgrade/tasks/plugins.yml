@@ -1,0 +1,58 @@
+---
+# Match the auth pattern from the existing teamcity role:
+# use artifactory_token if already defined, otherwise fall back to env vars.
+- name: Retrieve Artifactory token from environment
+  ansible.builtin.set_fact:
+    artifactory_username: "{{ lookup('env', 'ARTIFACTORY_USERNAME') }}"
+    artifactory_token: "{{ lookup('env', 'ARTIFACTORY_TOKEN') }}"
+  when: artifactory_token is not defined or not artifactory_token
+
+- name: Check if exact target plugin version is already installed
+  # Stat the exact filename derived from the URL rather than a name-prefix glob.
+  # The existing role uses find + name*.zip which matches any version — that is
+  # fine for initial install but skips re-download when upgrading to a new version.
+  ansible.builtin.stat:
+    path: "{{ teamcity_data_dir }}/plugins/{{ plugin_item.url | basename }}"
+  loop: "{{ teamcity_plugins }}"
+  loop_control:
+    loop_var: plugin_item
+  register: _plugin_version_check
+
+- name: Find old plugin versions where update is needed
+  ansible.builtin.find:
+    paths: "{{ teamcity_data_dir }}/plugins"
+    patterns: "{{ plugin_item.item.name }}*.zip"
+  loop: "{{ _plugin_version_check.results }}"
+  loop_control:
+    loop_var: plugin_item
+  when: not plugin_item.stat.exists
+  register: _old_plugin_files
+
+- name: Remove old plugin versions
+  ansible.builtin.file:
+    path: "{{ old_file.path }}"
+    state: absent
+  loop: >-
+    {{
+      _old_plugin_files.results
+      | selectattr('files', 'defined')
+      | map(attribute='files')
+      | flatten
+    }}
+  loop_control:
+    loop_var: old_file
+
+- name: Download updated plugins
+  ansible.builtin.get_url:
+    url: "{{ plugin_item.item.url }}"
+    dest: "{{ teamcity_data_dir }}/plugins/{{ plugin_item.item.url | basename }}"
+    headers:
+      X-JFrog-Art-Api: "{{ artifactory_token }}"
+    validate_certs: "{{ teamcity_validate_certs }}"
+    mode: "0644"
+    owner: "{{ teamcity_owner_user }}"
+    group: "{{ teamcity_owner_user }}"
+  loop: "{{ _plugin_version_check.results }}"
+  loop_control:
+    loop_var: plugin_item
+  when: not plugin_item.stat.exists
