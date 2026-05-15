@@ -1,0 +1,254 @@
+---
+# ------------------------------------------------------------------------------
+# precheck_oracle.yml
+# Validate Oracle DB is up, accessible, RAC instances healthy, SYS account OK
+# ------------------------------------------------------------------------------
+
+- name: "Oracle Pre-check | Test DB connectivity via sqlplus"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT 'CONNECTION_OK' FROM dual;
+    EXIT;
+    EOF
+  register: db_connectivity_check
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "Oracle Pre-check | Assert DB is accessible"
+  ansible.builtin.assert:
+    that:
+      - db_connectivity_check.rc == 0
+      - "'CONNECTION_OK' in db_connectivity_check.stdout"
+    fail_msg: >
+      Cannot connect to '{{ oracle_service }}' on {{ scan_address }}:{{ oracle_port }}.
+      Error: {{ db_connectivity_check.stderr | default('unknown') }}
+    success_msg: "Database is accessible on {{ scan_address }}:{{ oracle_port }}."
+
+- name: "Oracle Pre-check | Query all RAC instance statuses"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT inst_id
+           ||'|'|| instance_name
+           ||'|'|| status
+           ||'|'|| database_status
+           ||'|'|| active_state
+    FROM   gv\$instance
+    ORDER BY inst_id;
+    EXIT;
+    EOF
+  register: rac_instance_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+
+- name: "Oracle Pre-check | Parse RAC instance statuses"
+  ansible.builtin.set_fact:
+    rac_instances: >-
+      {{
+        rac_instance_raw.stdout_lines
+        | select('match', '^[0-9]')
+        | map('split', '|')
+        | map('map', 'trim')
+        | list
+      }}
+
+- name: "Oracle Pre-check | Display RAC instance statuses"
+  ansible.builtin.debug:
+    msg: >
+      Instance {{ item[1] }} (inst_id={{ item[0] }}):
+      status={{ item[2] }}, db_status={{ item[3] }}, active_state={{ item[4] }}
+  loop: "{{ rac_instances }}"
+
+- name: "Oracle Pre-check | Assert all RAC instances are OPEN and ACTIVE"
+  ansible.builtin.assert:
+    that:
+      - item[2] == 'OPEN'
+      - item[3] == 'ACTIVE'
+      - item[4] == 'NORMAL'
+    fail_msg: >
+      RAC instance '{{ item[1] }}' (inst_id={{ item[0] }}) is not healthy.
+      Status={{ item[2] }}, DB_Status={{ item[3] }}, Active_State={{ item[4] }}.
+    success_msg: "Instance {{ item[1] }} is OPEN and ACTIVE."
+  loop: "{{ rac_instances }}"
+
+- name: "Oracle Pre-check | Query database role and open mode"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT name
+           ||'|'|| db_unique_name
+           ||'|'|| open_mode
+           ||'|'|| database_role
+           ||'|'|| protection_mode
+    FROM   v\$database;
+    EXIT;
+    EOF
+  register: db_role_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+
+- name: "Oracle Pre-check | Parse database role facts"
+  ansible.builtin.set_fact:
+    db_parsed: >-
+      {{
+        db_role_raw.stdout_lines
+        | select('match', '^[A-Z]')
+        | first
+        | split('|')
+        | map('trim')
+        | list
+      }}
+
+- name: "Oracle Pre-check | Set individual database facts"
+  ansible.builtin.set_fact:
+    db_name_actual:       "{{ db_parsed[0] }}"
+    db_unique_name_actual: "{{ db_parsed[1] }}"
+    db_open_mode:         "{{ db_parsed[2] }}"
+    db_role:              "{{ db_parsed[3] }}"
+    db_protection_mode:   "{{ db_parsed[4] }}"
+
+- name: "Oracle Pre-check | Display database role information"
+  ansible.builtin.debug:
+    msg:
+      - "DB Name        : {{ db_name_actual }}"
+      - "DB Unique Name : {{ db_unique_name_actual }}"
+      - "Open Mode      : {{ db_open_mode }}"
+      - "Database Role  : {{ db_role }}"
+      - "Protection Mode: {{ db_protection_mode }}"
+
+- name: "Oracle Pre-check | Assert DB is open READ WRITE"
+  ansible.builtin.assert:
+    that:
+      - db_open_mode == 'READ WRITE'
+    fail_msg: >
+      Database open mode is '{{ db_open_mode }}'. Expected 'READ WRITE'.
+      Rotation must only run on a PRIMARY in READ WRITE mode.
+    success_msg: "Database is open READ WRITE."
+
+- name: "Oracle Pre-check | Assert this is a PRIMARY database"
+  ansible.builtin.assert:
+    that:
+      - db_role == 'PRIMARY'
+    fail_msg: >
+      Database role is '{{ db_role }}'. Rotation must be performed on PRIMARY only.
+    success_msg: "Database role is PRIMARY."
+
+- name: "Oracle Pre-check | Query PDB open modes"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT name
+           ||'|'|| open_mode
+           ||'|'|| restricted
+    FROM   v\$pdbs
+    ORDER BY name;
+    EXIT;
+    EOF
+  register: pdb_status_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+
+- name: "Oracle Pre-check | Parse PDB statuses"
+  ansible.builtin.set_fact:
+    pdb_list: >-
+      {{
+        pdb_status_raw.stdout_lines
+        | select('match', '^[A-Z$]')
+        | map('split', '|')
+        | map('map', 'trim')
+        | list
+      }}
+
+- name: "Oracle Pre-check | Display PDB statuses"
+  ansible.builtin.debug:
+    msg: "PDB {{ item[0] }}: open_mode={{ item[1] }}, restricted={{ item[2] }}"
+  loop: "{{ pdb_list }}"
+
+- name: "Oracle Pre-check | Assert no open PDBs are in RESTRICTED mode"
+  ansible.builtin.assert:
+    that:
+      - item[2] == 'NO'
+    fail_msg: >
+      PDB '{{ item[0] }}' is in RESTRICTED mode. Investigate before rotation.
+    success_msg: "PDB {{ item[0] }} is not restricted."
+  loop: "{{ pdb_list }}"
+  when: item[1] != 'MOUNTED'
+
+- name: "Oracle Pre-check | Query SYS account status"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT account_status
+           ||'|'|| NVL(TO_CHAR(expiry_date,'YYYY-MM-DD'),'NULL')
+           ||'|'|| profile
+           ||'|'|| NVL(TO_CHAR(last_login,'YYYY-MM-DD HH24:MI:SS'),'NULL')
+    FROM   dba_users
+    WHERE  username = 'SYS';
+    EXIT;
+    EOF
+  register: sys_account_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+
+- name: "Oracle Pre-check | Parse SYS account facts"
+  ansible.builtin.set_fact:
+    sys_parsed: >-
+      {{
+        sys_account_raw.stdout_lines
+        | select('match', '^[A-Z]')
+        | first
+        | split('|')
+        | map('trim')
+        | list
+      }}
+
+- name: "Oracle Pre-check | Set SYS account individual facts"
+  ansible.builtin.set_fact:
+    sys_account_status_value: "{{ sys_parsed[0] }}"
+    sys_expiry_date:           "{{ sys_parsed[1] }}"
+    sys_profile:               "{{ sys_parsed[2] }}"
+    sys_last_login:            "{{ sys_parsed[3] }}"
+
+- name: "Oracle Pre-check | Display SYS account status"
+  ansible.builtin.debug:
+    msg:
+      - "Account Status : {{ sys_account_status_value }}"
+      - "Profile        : {{ sys_profile }}"
+      - "Expiry Date    : {{ sys_expiry_date }}"
+      - "Last Login     : {{ sys_last_login }}"
+
+- name: "Oracle Pre-check | Assert SYS account is not locked"
+  ansible.builtin.assert:
+    that:
+      - "'LOCKED' not in sys_account_status_value"
+    fail_msg: >
+      SYS account status is '{{ sys_account_status_value }}'.
+      Unlock before attempting rotation.
+    success_msg: "SYS account is not locked (status: {{ sys_account_status_value }})."

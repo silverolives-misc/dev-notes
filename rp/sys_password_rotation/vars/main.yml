@@ -1,0 +1,27 @@
+---
+# ------------------------------------------------------------------------------
+# vars/main.yml
+# Internal role variables — not intended to be overridden by users
+# ------------------------------------------------------------------------------
+
+# Standard sqlplus silent preamble used in all shell tasks
+sqlplus_preamble: |
+  WHENEVER SQLERROR EXIT SQL.SQLCODE
+  WHENEVER OSERROR  EXIT 1
+  SET PAGESIZE     0
+  SET FEEDBACK     OFF
+  SET HEADING      OFF
+  SET ECHO         OFF
+  SET TRIMSPOOL    ON
+  SET LINESIZE     4000
+  SET COLSEP       '|'
+  SET NULL         'NULL'
+
+# Oracle environment export block used in all shell tasks
+oracle_env: |
+  export ORACLE_HOME={{ oracle_home }}
+  export PATH=$ORACLE_HOME/bin:$PATH
+  export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
+
+# sqlplus connect string (SCAN-based)
+sqlplus_connect: "sys/\"{{ current_sys_password }}\"@{{ scan_address }}:{{ oracle_port }}/{{ oracle_service }} as sysdba"

@@ -1,0 +1,69 @@
+---
+# ------------------------------------------------------------------------------
+# tasks/main.yml
+# Role entry point — ordered execution of all task files
+# ------------------------------------------------------------------------------
+
+# --- Phase 1: Vault pre-checks ------------------------------------------------
+- name: "Phase 1 | Vault pre-checks"
+  ansible.builtin.import_tasks: precheck_vault.yml
+  tags: [precheck, precheck_vault]
+
+# --- Phase 2: Topology detection ----------------------------------------------
+- name: "Phase 2 | Topology detection"
+  ansible.builtin.import_tasks: detect_topology.yml
+  tags: [precheck, detect_topology]
+
+# --- Phase 3: Oracle DB pre-checks -------------------------------------------
+- name: "Phase 3 | Oracle DB pre-checks"
+  ansible.builtin.import_tasks: precheck_oracle.yml
+  tags: [precheck, precheck_oracle]
+
+# --- Phase 4: Data Guard pre-checks (when detected) --------------------------
+- name: "Phase 4 | Data Guard pre-checks"
+  ansible.builtin.import_tasks: precheck_dataguard.yml
+  when: dg_detected | default(false) | bool
+  tags: [precheck, precheck_dg]
+
+# --- Phase 5: Password policy pre-checks -------------------------------------
+- name: "Phase 5 | Password policy pre-checks"
+  ansible.builtin.import_tasks: precheck_password_policy.yml
+  tags: [precheck, precheck_policy]
+
+# --- Phase 6: Session and backup pre-checks ----------------------------------
+- name: "Phase 6 | Session and backup pre-checks"
+  ansible.builtin.import_tasks: precheck_sessions.yml
+  tags: [precheck, precheck_sessions]
+
+# --- Phase 7: Evaluate rotation requirement ----------------------------------
+- name: "Phase 7 | Evaluate rotation requirement"
+  ansible.builtin.import_tasks: evaluate_rotation.yml
+  tags: [evaluate]
+
+# --- Phase 8: Execute rotation -----------------------------------------------
+- name: "Phase 8 | Execute password rotation"
+  ansible.builtin.import_tasks: rotate.yml
+  when: rotation_required | default(false) | bool
+  tags: [rotate]
+
+# --- Phase 9: Data Guard post-rotation actions --------------------------------
+- name: "Phase 9 | Data Guard post-rotation actions"
+  ansible.builtin.import_tasks: action_dataguard.yml
+  when:
+    - rotation_required | default(false) | bool
+    - dg_detected | default(false) | bool
+  tags: [rotate, action_dg]
+
+# --- Phase 10: Commvault post-rotation actions --------------------------------
+- name: "Phase 10 | Commvault post-rotation actions"
+  ansible.builtin.import_tasks: action_commvault.yml
+  when:
+    - rotation_required | default(false) | bool
+    - commvault_detected | default(false) | bool
+  tags: [rotate, action_commvault]
+
+# --- Phase 11: Post-rotation validation --------------------------------------
+- name: "Phase 11 | Post-rotation validation"
+  ansible.builtin.import_tasks: post_validate.yml
+  when: rotation_required | default(false) | bool
+  tags: [validate]

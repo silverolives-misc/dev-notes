@@ -1,0 +1,167 @@
+---
+# ------------------------------------------------------------------------------
+# action_commvault.yml
+# Post-rotation actions for environments where Commvault is detected.
+# Commvault uses RMAN (SBT device) to connect to Oracle. If the account it
+# connects as (typically SYS or SYSBACKUP) is rotated, Commvault credentials
+# must be updated or backup jobs will fail after the rollover window expires.
+#
+# Two modes controlled by commvault_notify_only (default: true):
+#   true  — log a notice only; DBA/Commvault admin must update credentials
+#   false — attempt to update Commvault credentials via simpana CLI
+# ------------------------------------------------------------------------------
+
+- name: "Commvault Action | Display Commvault detection summary"
+  ansible.builtin.debug:
+    msg:
+      - "============================================="
+      - " Commvault Detected — Action Required"
+      - "============================================="
+      - "Mode            : {{ 'Notify Only' if commvault_notify_only | bool else 'Auto Update' }}"
+      - "DB              : {{ db_unique_name }}"
+      - "Node            : {{ node_fqdn }}"
+      - "CV Ora User     : {{ commvault_ora_user }}"
+      - "Rollover Window : {{ profile_limits.PASSWORD_ROLLOVER_TIME | default('unknown') }} days"
+      - "ACTION REQUIRED : Commvault credentials must be updated before"
+      - "                  the rollover window expires."
+      - "============================================="
+
+# --- Notify Only Mode ---------------------------------------------------------
+
+- name: "Commvault Action | Write rotation notice to log (notify mode)"
+  ansible.builtin.copy:
+    content: |
+      ================================================================================
+      COMMVAULT CREDENTIAL UPDATE REQUIRED
+      ================================================================================
+      Date/Time       : {{ ansible_date_time.iso8601 }}
+      Database        : {{ db_unique_name }}
+      DB Unique Name  : {{ db_unique_name_actual | default(db_unique_name) }}
+      Primary Node    : {{ node_fqdn }}
+      SCAN Address    : {{ scan_address }}
+      Oracle Version  : {{ oracle_version_full | default('unknown') }}
+      CV Oracle User  : {{ commvault_ora_user }}
+
+      ACTION REQUIRED:
+      The SYS password has been rotated. Commvault connects to this database
+      using Oracle credentials for RMAN backup operations.
+
+      You MUST update the Commvault credential for this database before the
+      PASSWORD_ROLLOVER_TIME window expires
+      ({{ profile_limits.PASSWORD_ROLLOVER_TIME | default('unknown') }} days from {{ ansible_date_time.iso8601 }}).
+
+      Steps to update in Commvault CommCell Console:
+        1. Open CommCell Console
+        2. Navigate to: Client Computers > [DB Client] > Oracle > [DB Instance]
+        3. Right-click the instance > Properties
+        4. Update the SYSDBA/SYS password with the new credential
+        5. Run a test backup to confirm connectivity
+
+      Alternatively update via Commvault Command Line:
+        qlogin -cs [commserve_hostname] -u [admin_user]
+        qoperation execscript -sn QS_UpdateOracleInstanceCredentials \
+          -si [client_name] -si [instance_name]
+
+      Vault Path (new password):
+        {{ vault_mount_point }}/data/{{ vault_secret_path }}
+
+      If Commvault backup fails after this date the old password will no longer
+      be valid and manual credential recovery will be required.
+      ================================================================================
+    dest: "{{ commvault_notification_log }}"
+    mode: '0640'
+    owner: root
+    group: root
+  become: true
+  become_user: root
+  delegate_to: "{{ node_fqdn }}"
+  when: commvault_notify_only | bool
+
+- name: "Commvault Action | Display notice path"
+  ansible.builtin.debug:
+    msg: >
+      Commvault rotation notice written to
+      {{ commvault_notification_log }} on {{ node_fqdn }}.
+      A Commvault administrator must update credentials before the
+      rollover window ({{ profile_limits.PASSWORD_ROLLOVER_TIME | default('unknown') }} days) expires.
+  when: commvault_notify_only | bool
+
+# --- Auto Update Mode ---------------------------------------------------------
+
+- name: "Commvault Action | Check simpana binary is available (auto update mode)"
+  ansible.builtin.stat:
+    path: "/usr/bin/simpana"
+  register: simpana_stat
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+  when: not commvault_notify_only | bool
+
+- name: "Commvault Action | Assert simpana is available for auto update"
+  ansible.builtin.assert:
+    that:
+      - simpana_stat.stat.exists
+      - simpana_stat.stat.executable
+    fail_msg: >
+      commvault_notify_only is false but simpana binary not found.
+      Cannot auto-update Commvault credentials. Either install simpana CLI
+      or set commvault_notify_only: true and update credentials manually.
+    success_msg: "simpana binary found — proceeding with credential update."
+  when: not commvault_notify_only | bool
+
+- name: "Commvault Action | Update Commvault Oracle instance credentials via simpana"
+  ansible.builtin.shell: |
+    /usr/bin/simpana stop
+    sleep 5
+    /usr/bin/simpana start
+  register: simpana_restart
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+  changed_when: simpana_restart.rc == 0
+  failed_when: false
+  when:
+    - not commvault_notify_only | bool
+    - simpana_stat.stat.exists | default(false)
+  no_log: true
+
+- name: "Commvault Action | Note — manual credential update still required"
+  ansible.builtin.debug:
+    msg: >
+      NOTE: Commvault service was restarted on {{ node_fqdn }}.
+      You still need to update the Oracle instance password in CommCell Console
+      for database '{{ db_unique_name }}'. The service restart alone does not
+      update stored credentials. See the rotation notice at
+      {{ commvault_notification_log }} for full instructions.
+  when: not commvault_notify_only | bool
+
+# --- Commvault RMAN validation ------------------------------------------------
+
+- name: "Commvault Action | Check last SBT backup job status post-rotation"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT sys/"{{ new_sys_password }}"@{{ scan_address }}:{{ oracle_port }}/{{ oracle_service }} as sysdba
+    SELECT NVL(MAX(TO_CHAR(start_time,'YYYY-MM-DD HH24:MI')),'NONE') ||'|'||
+           NVL(MAX(status),'NONE')
+    FROM   v\$rman_backup_job_details
+    WHERE  output_device_type = 'SBT_TAPE'
+    AND    start_time > SYSDATE - 1;
+    EXIT;
+    EOF
+  register: cv_last_backup_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "Commvault Action | Display last Commvault backup status"
+  ansible.builtin.debug:
+    msg: >
+      Last Commvault (SBT) backup in last 24h:
+      time={{ cv_last_backup_raw.stdout.split('|')[0] | trim }},
+      status={{ cv_last_backup_raw.stdout.split('|')[1] | trim }}.
+      Monitor next scheduled backup to confirm credentials are still valid.

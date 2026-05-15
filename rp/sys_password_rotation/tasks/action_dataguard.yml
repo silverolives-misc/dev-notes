@@ -1,0 +1,138 @@
+---
+# ------------------------------------------------------------------------------
+# action_dataguard.yml
+# Post-rotation actions for Data Guard environments.
+# Propagates password blob to standby nodes and updates Vault for each member.
+# Runs only when dg_detected=true and rotation_required=true
+# ------------------------------------------------------------------------------
+
+- name: "DG Action | Display standby members to be updated"
+  ansible.builtin.debug:
+    msg:
+      - "Data Guard rotation propagation required."
+      - "Standby members: {{ dg_standby_members | map(attribute=0) | list }}"
+      - "Blob file      : /tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}"
+
+- name: "DG Action | Verify blob file was created on primary node"
+  ansible.builtin.stat:
+    path: "/tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}"
+  register: blob_stat
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+
+- name: "DG Action | Assert blob file exists"
+  ansible.builtin.assert:
+    that:
+      - blob_stat.stat.exists
+    fail_msg: >
+      Standby blob file not found at
+      /tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}.
+      dbaascli may not have created it. Check dbaascli output.
+    success_msg: "Standby blob file confirmed present."
+
+- name: "DG Action | Copy blob file to each standby node"
+  ansible.builtin.shell: |
+    scp -o StrictHostKeyChecking=no \
+      /tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }} \
+      oracle@{{ item[0] }}:/tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}
+  loop: "{{ dg_standby_members }}"
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  register: blob_copy_result
+  failed_when: blob_copy_result.rc != 0
+
+- name: "DG Action | Set correct ownership of blob on each standby"
+  ansible.builtin.shell: |
+    chown oracle:oinstall /tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}
+  loop: "{{ dg_standby_members }}"
+  delegate_to: "{{ item[0] }}"
+  become: true
+  become_user: root
+
+- name: "DG Action | Apply password change on each standby via dbaascli"
+  ansible.builtin.shell: |
+    {{ dbaascli_path }} database changePassword \
+      --dbname {{ oracle_db_name | default(db_unique_name) }} \
+      --user SYS \
+      --standbyBlobFromPrimary /tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}
+  register: standby_rotate_result
+  loop: "{{ dg_standby_members }}"
+  delegate_to: "{{ item[0] }}"
+  become: true
+  become_user: root
+  no_log: true
+  changed_when: standby_rotate_result.rc == 0
+  failed_when: standby_rotate_result.rc != 0
+
+- name: "DG Action | Assert standby password propagation succeeded"
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+    fail_msg: >
+      dbaascli standby password update failed on
+      {{ dg_standby_members[idx][0] }} (RC={{ item.rc }}).
+      Manual intervention required to synchronise standby password.
+    success_msg: "Standby password updated on {{ dg_standby_members[idx][0] }}."
+  loop: "{{ standby_rotate_result.results }}"
+  loop_control:
+    index_var: idx
+
+- name: "DG Action | Write new password to Vault for each standby member"
+  community.hashi_vault.vault_kv2_put:
+    url: "{{ vault_url }}"
+    path: "{{ environment }}/exacc/{{ dg_standby_region | default(region) }}/{{ item[0] }}/sys"
+    mount_point: "{{ vault_mount_point }}"
+    auth_method: "{{ vault_auth_method }}"
+    role_id: "{{ vault_role_id }}"
+    secret_id: "{{ vault_secret_id }}"
+    data:
+      password: "{{ new_sys_password }}"
+      db_unique_name: "{{ item[0] }}"
+      db_role: "{{ item[1] }}"
+      oracle_version: "{{ oracle_version_full | default('unknown') }}"
+      rotated_by: "{{ ansible_user_id }}"
+      rotated_at: "{{ ansible_date_time.iso8601 }}"
+      propagated_from: "{{ db_unique_name }}"
+  no_log: true
+  loop: "{{ dg_standby_members }}"
+  register: vault_write_standby
+
+- name: "DG Action | Assert Vault writes succeeded for all standbys"
+  ansible.builtin.assert:
+    that:
+      - item is not failed
+    fail_msg: >
+      CRITICAL: Vault write failed for standby member {{ dg_standby_members[idx][0] }}.
+      The DB password was updated but Vault is out of sync.
+      Update manually: {{ vault_mount_point }}/data/{{ environment }}/exacc/{{ dg_standby_region | default(region) }}/{{ dg_standby_members[idx][0] }}/sys
+    success_msg: "Vault updated for standby {{ dg_standby_members[idx][0] }}."
+  loop: "{{ vault_write_standby.results }}"
+  loop_control:
+    index_var: idx
+
+- name: "DG Action | Clean up blob files from primary"
+  ansible.builtin.file:
+    path: "/tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}"
+    state: absent
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+
+- name: "DG Action | Clean up blob files from each standby"
+  ansible.builtin.file:
+    path: "/tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}"
+    state: absent
+  loop: "{{ dg_standby_members }}"
+  delegate_to: "{{ item[0] }}"
+  become: true
+  become_user: root
+
+- name: "DG Action | Display DG rotation summary"
+  ansible.builtin.debug:
+    msg:
+      - "Data Guard rotation complete."
+      - "Primary updated  : {{ db_unique_name }}"
+      - "Standbys updated : {{ dg_standby_members | map(attribute=0) | list }}"
+      - "Vault updated for: {{ ([db_unique_name] + dg_standby_members | map(attribute=0) | list) }}"

@@ -1,0 +1,99 @@
+---
+# ------------------------------------------------------------------------------
+# precheck_dataguard.yml
+# Validate Data Guard health before rotation — only runs when dg_detected=true
+# ------------------------------------------------------------------------------
+
+- name: "DG Pre-check | Query Data Guard status errors"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT COUNT(*) FROM v\$dataguard_status
+    WHERE  severity IN ('Error','Fatal');
+    EXIT;
+    EOF
+  register: dg_error_count_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+
+- name: "DG Pre-check | Assert no fatal Data Guard errors"
+  ansible.builtin.assert:
+    that:
+      - dg_error_count_raw.stdout | trim | int == 0
+    fail_msg: >
+      Data Guard has {{ dg_error_count_raw.stdout | trim }} active Error/Fatal
+      status messages. Resolve before rotating the SYS password.
+    success_msg: "No fatal Data Guard errors found."
+
+- name: "DG Pre-check | Query Data Guard apply and transport lag"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT name ||'|'|| NVL(value,'NOT AVAILABLE') ||'|'|| NVL(unit,'N/A')
+    FROM   v\$dataguard_stats
+    WHERE  name IN ('apply lag','transport lag');
+    EXIT;
+    EOF
+  register: dg_lag_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+
+- name: "DG Pre-check | Display Data Guard lag statistics"
+  ansible.builtin.debug:
+    msg: >
+      {{ item.split('|')[0] | trim }}: {{ item.split('|')[1] | trim }}
+      ({{ item.split('|')[2] | trim }})
+  loop: "{{ dg_lag_raw.stdout_lines | select('match', '^(apply|transport)') | list }}"
+
+- name: "DG Pre-check | Query MRP process status"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT NVL(MAX(process),'NONE') ||'|'|| NVL(MAX(status),'NONE')
+    FROM   v\$managed_standby
+    WHERE  process LIKE 'MRP%';
+    EXIT;
+    EOF
+  register: mrp_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "DG Pre-check | Parse MRP status"
+  ansible.builtin.set_fact:
+    mrp_process: "{{ (mrp_raw.stdout_lines | select('match', '^[A-Z]') | first | split('|') | map('trim') | list)[0] }}"
+    mrp_status:  "{{ (mrp_raw.stdout_lines | select('match', '^[A-Z]') | first | split('|') | map('trim') | list)[1] }}"
+
+- name: "DG Pre-check | Display MRP status"
+  ansible.builtin.debug:
+    msg: "MRP Process={{ mrp_process }}, Status={{ mrp_status }}"
+
+- name: "DG Pre-check | Display standby member summary"
+  ansible.builtin.debug:
+    msg:
+      - "DG Standby members detected: {{ dg_standby_members | length }}"
+      - "Members: {{ dg_standby_members | map(attribute=0) | list }}"
+  when: dg_standby_members | default([]) | length > 0
+
+- name: "DG Pre-check | Note DG password requirements"
+  ansible.builtin.debug:
+    msg: >
+      IMPORTANT: Data Guard is active (protection mode: {{ db_protection_mode }}).
+      After rotating SYS on the PRIMARY, dbaascli will propagate the change to
+      standbys via blob file. Vault will be updated for all detected members:
+      {{ dg_standby_members | default([]) | map(attribute=0) | list }}.

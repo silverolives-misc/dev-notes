@@ -1,0 +1,117 @@
+---
+# ------------------------------------------------------------------------------
+# post_validate.yml
+# Verify rotation success — connect with new password, confirm Vault updated
+# ------------------------------------------------------------------------------
+
+- name: "Post-validate | Pause to allow password change to propagate"
+  ansible.builtin.pause:
+    seconds: 5
+
+- name: "Post-validate | Test DB connectivity with new password"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT sys/"{{ new_sys_password }}"@{{ scan_address }}:{{ oracle_port }}/{{ oracle_service }} as sysdba
+    SELECT 'CONNECTION_OK' FROM dual;
+    EXIT;
+    EOF
+  register: post_connect_check
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "Post-validate | Assert new password works"
+  ansible.builtin.assert:
+    that:
+      - post_connect_check.rc == 0
+      - "'CONNECTION_OK' in post_connect_check.stdout"
+    fail_msg: >
+      CRITICAL: Cannot connect with new password (RC={{ post_connect_check.rc }}).
+      Old password still valid within rollover window.
+      Check break-glass backup at {{ breakglass_backup_path }}.
+    success_msg: "Successfully connected with new password."
+
+- name: "Post-validate | Query SYS account status with new password"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT sys/"{{ new_sys_password }}"@{{ scan_address }}:{{ oracle_port }}/{{ oracle_service }} as sysdba
+    SELECT account_status FROM dba_users WHERE username = 'SYS';
+    EXIT;
+    EOF
+  register: post_status_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+
+- name: "Post-validate | Assert SYS account is still healthy"
+  ansible.builtin.assert:
+    that:
+      - "'LOCKED' not in post_status_raw.stdout"
+    fail_msg: >
+      SYS account is locked post-rotation: {{ post_status_raw.stdout | trim }}.
+    success_msg: "SYS account status post-rotation: {{ post_status_raw.stdout | trim }}."
+
+- name: "Post-validate | Verify Vault metadata version incremented"
+  community.hashi_vault.vault_read:
+    url: "{{ vault_url }}"
+    path: "{{ vault_mount_point }}/metadata/{{ vault_secret_path }}"
+    auth_method: "{{ vault_auth_method }}"
+    role_id: "{{ vault_role_id }}"
+    secret_id: "{{ vault_secret_id }}"
+  register: vault_post_metadata
+  no_log: true
+
+- name: "Post-validate | Assert Vault version incremented"
+  ansible.builtin.assert:
+    that:
+      - vault_post_metadata.data.current_version | int > vault_secret_current_version | int
+    fail_msg: >
+      Vault version did not increment.
+      Before={{ vault_secret_current_version }},
+      After={{ vault_post_metadata.data.current_version }}.
+    success_msg: >
+      Vault version incremented from {{ vault_secret_current_version }}
+      to {{ vault_post_metadata.data.current_version }}.
+
+- name: "Post-validate | Remove break-glass backup after confirmed success"
+  ansible.builtin.file:
+    path: "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
+    state: absent
+  become: true
+  become_user: root
+  delegate_to: "{{ node_fqdn }}"
+  when: breakglass_backup_enabled | bool
+
+- name: "Post-validate | Display final rotation summary"
+  ansible.builtin.debug:
+    msg:
+      - "============================================="
+      - " SYS Password Rotation Complete"
+      - "============================================="
+      - "Database        : {{ oracle_service }}"
+      - "DB Unique Name  : {{ db_unique_name }}"
+      - "Node            : {{ node_fqdn }}"
+      - "SCAN            : {{ scan_address }}"
+      - "DB Role         : {{ db_role }}"
+      - "Oracle Version  : {{ oracle_version_full | default('unknown') }}"
+      - "Account Status  : {{ post_status_raw.stdout | trim }}"
+      - "DG Detected     : {{ dg_detected | default(false) }}"
+      - "CV Detected     : {{ commvault_detected | default(false) }}"
+      - "Vault Path      : {{ vault_mount_point }}/data/{{ vault_secret_path }}"
+      - "Vault Version   : {{ vault_post_metadata.data.current_version }}"
+      - "Updated Time    : {{ vault_post_metadata.data.updated_time }}"
+      - "Rotated At      : {{ ansible_date_time.iso8601 }}"
+      - "Rotated By      : {{ ansible_user_id }}"
+      - "============================================="
+      - "{% if commvault_detected | default(false) %}ACTION: Update Commvault credentials — see {{ commvault_notification_log }}{% endif %}"
+      - "{% if dg_detected | default(false) %}DG standbys updated: {{ dg_standby_members | default([]) | map(attribute=0) | list }}{% endif %}"
+      - "============================================="

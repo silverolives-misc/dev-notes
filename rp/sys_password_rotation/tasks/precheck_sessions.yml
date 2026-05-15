@@ -1,0 +1,135 @@
+---
+# ------------------------------------------------------------------------------
+# precheck_sessions.yml
+# Check active SYS sessions, RMAN jobs, and dbaascli availability
+# ------------------------------------------------------------------------------
+
+- name: "Session Pre-check | Query active SYS sessions across all RAC instances"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT inst_id
+           ||'|'|| sid
+           ||'|'|| status
+           ||'|'|| NVL(machine,'UNKNOWN')
+           ||'|'|| NVL(program,'UNKNOWN')
+    FROM   gv\$session
+    WHERE  username = 'SYS'
+    AND    type     = 'USER'
+    ORDER BY inst_id, logon_time;
+    EXIT;
+    EOF
+  register: sys_sessions_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+
+- name: "Session Pre-check | Parse active SYS sessions"
+  ansible.builtin.set_fact:
+    sys_sessions: >-
+      {{
+        sys_sessions_raw.stdout_lines
+        | select('match', '^[0-9]')
+        | map('split', '|')
+        | map('map', 'trim')
+        | list
+      }}
+
+- name: "Session Pre-check | Set session count"
+  ansible.builtin.set_fact:
+    sys_active_session_count: "{{ sys_sessions | length }}"
+
+- name: "Session Pre-check | Display active SYS sessions"
+  ansible.builtin.debug:
+    msg:
+      - "Active SYS sessions : {{ sys_active_session_count }}"
+      - "Programs connected  : {{ sys_sessions | map(attribute=4) | unique | list }}"
+
+- name: "Session Pre-check | Warn if SYS sessions exceed threshold"
+  ansible.builtin.debug:
+    msg: >
+      WARNING: {{ sys_active_session_count }} active SYS session(s) found
+      (threshold: {{ sys_session_warning_threshold }}).
+      These will continue working within the PASSWORD_ROLLOVER_TIME window
+      but must migrate to the new password before the window expires.
+      Programs: {{ sys_sessions | map(attribute=4) | unique | list }}
+  when: sys_active_session_count | int > sys_session_warning_threshold | int
+
+- name: "Session Pre-check | Query active RMAN backup jobs"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT NVL(MAX(status),'NONE') ||'|'|| COUNT(*)
+    FROM   v\$rman_backup_job_details
+    WHERE  status = 'RUNNING';
+    EXIT;
+    EOF
+  register: rman_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+
+- name: "Session Pre-check | Parse RMAN status"
+  ansible.builtin.set_fact:
+    rman_status:    "{{ (rman_raw.stdout_lines | select('match', '^[A-Z0-9]') | first | split('|') | map('trim') | list)[0] }}"
+    rman_job_count: "{{ (rman_raw.stdout_lines | select('match', '^[A-Z0-9]') | first | split('|') | map('trim') | list)[1] }}"
+
+- name: "Session Pre-check | Display RMAN job status"
+  ansible.builtin.debug:
+    msg: "Active RMAN jobs: {{ rman_job_count }} (status: {{ rman_status }})"
+
+- name: "Session Pre-check | Assert no active RMAN jobs"
+  ansible.builtin.assert:
+    that:
+      - rman_status == 'NONE'
+      - rman_job_count | int == 0
+    fail_msg: >
+      {{ rman_job_count }} RMAN backup job(s) are currently running.
+      Wait for backups to complete before rotating.
+    success_msg: "No active RMAN backup jobs."
+  when: fail_on_active_rman | bool
+
+- name: "Session Pre-check | Assert dbaascli is present and executable"
+  ansible.builtin.stat:
+    path: "{{ dbaascli_path }}"
+  register: dbaascli_stat
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+
+- name: "Session Pre-check | Assert dbaascli exists"
+  ansible.builtin.assert:
+    that:
+      - dbaascli_stat.stat.exists
+      - dbaascli_stat.stat.executable
+    fail_msg: >
+      dbaascli not found or not executable at '{{ dbaascli_path }}'.
+    success_msg: "dbaascli is available at {{ dbaascli_path }}."
+
+- name: "Session Pre-check | Check pexpect is available for expect module"
+  ansible.builtin.command:
+    cmd: python3 -c "import pexpect; print(pexpect.__version__)"
+  register: pexpect_check
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+  changed_when: false
+  failed_when: false
+
+- name: "Session Pre-check | Assert pexpect is installed"
+  ansible.builtin.assert:
+    that:
+      - pexpect_check.rc == 0
+    fail_msg: >
+      Python pexpect module is not installed on {{ node_fqdn }}.
+      The rotate task uses ansible.builtin.expect which requires pexpect >= 3.3.
+      Install with: pip3 install 'pexpect>=3.3'
+    success_msg: "pexpect {{ pexpect_check.stdout | trim }} is available."

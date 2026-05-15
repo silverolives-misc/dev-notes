@@ -1,0 +1,88 @@
+---
+# ------------------------------------------------------------------------------
+# precheck_vault.yml
+# Validate Vault connectivity, permissions, and read current secret metadata
+# ------------------------------------------------------------------------------
+
+- name: "Vault Pre-check | Retrieve KV2 secret metadata"
+  community.hashi_vault.vault_read:
+    url: "{{ vault_url }}"
+    path: "{{ vault_mount_point }}/metadata/{{ vault_secret_path }}"
+    auth_method: "{{ vault_auth_method }}"
+    role_id: "{{ vault_role_id }}"
+    secret_id: "{{ vault_secret_id }}"
+  register: vault_metadata_raw
+  failed_when: false
+  no_log: true
+
+- name: "Vault Pre-check | Assert Vault is reachable and path exists"
+  ansible.builtin.assert:
+    that:
+      - vault_metadata_raw is not failed
+      - vault_metadata_raw.data is defined
+    fail_msg: >
+      Cannot reach Vault or secret path
+      '{{ vault_mount_point }}/metadata/{{ vault_secret_path }}' does not exist.
+      Ensure Vault is accessible and the secret has been initialised.
+    success_msg: "Vault is reachable and secret metadata retrieved."
+
+- name: "Vault Pre-check | Set metadata facts"
+  ansible.builtin.set_fact:
+    vault_secret_updated_time: "{{ vault_metadata_raw.data.updated_time }}"
+    vault_secret_current_version: "{{ vault_metadata_raw.data.current_version }}"
+
+- name: "Vault Pre-check | Calculate secret age in days"
+  ansible.builtin.set_fact:
+    secret_age_days: >-
+      {{
+        ((ansible_date_time.iso8601 | to_datetime('%Y-%m-%dT%H:%M:%SZ'))
+        - (vault_secret_updated_time | regex_replace('\\..*Z$', 'Z')
+        | to_datetime('%Y-%m-%dT%H:%M:%SZ'))).days
+      }}
+
+- name: "Vault Pre-check | Display secret age"
+  ansible.builtin.debug:
+    msg: >
+      Secret '{{ vault_secret_path }}' (version {{ vault_secret_current_version }})
+      last updated {{ secret_age_days }} days ago.
+      Rotation threshold: {{ password_max_age_days }} days.
+
+- name: "Vault Pre-check | Assert secret is not too new to rotate"
+  ansible.builtin.assert:
+    that:
+      - secret_age_days | int >= password_min_age_days | int
+    fail_msg: >
+      Password was rotated only {{ secret_age_days }} days ago
+      (minimum: {{ password_min_age_days }} days). Aborting to prevent
+      double-rotation.
+    success_msg: "Secret age meets minimum age requirement."
+
+- name: "Vault Pre-check | Read current secret data"
+  community.hashi_vault.vault_read:
+    url: "{{ vault_url }}"
+    path: "{{ vault_mount_point }}/data/{{ vault_secret_path }}"
+    auth_method: "{{ vault_auth_method }}"
+    role_id: "{{ vault_role_id }}"
+    secret_id: "{{ vault_secret_id }}"
+  register: vault_secret_raw
+  failed_when: false
+  no_log: true
+
+- name: "Vault Pre-check | Assert current secret is readable"
+  ansible.builtin.assert:
+    that:
+      - vault_secret_raw is not failed
+      - vault_secret_raw.data is defined
+      - vault_secret_raw.data.data is defined
+      - vault_secret_raw.data.data.password is defined
+    fail_msg: >
+      Unable to read current secret from
+      '{{ vault_mount_point }}/data/{{ vault_secret_path }}'.
+      Check token/AppRole permissions.
+    success_msg: "Current secret is readable from Vault."
+
+- name: "Vault Pre-check | Set current password fact"
+  ansible.builtin.set_fact:
+    current_sys_password: "{{ vault_secret_raw.data.data.password }}"
+    vault_payload: "{{ vault_secret_raw.data.data }}"
+  no_log: true

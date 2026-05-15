@@ -1,0 +1,88 @@
+---
+# ------------------------------------------------------------------------------
+# evaluate_rotation.yml
+# Decide if rotation is needed, generate new password, write break-glass backup
+# ------------------------------------------------------------------------------
+
+- name: "Evaluate | Determine if rotation is required"
+  ansible.builtin.set_fact:
+    rotation_required: "{{ secret_age_days | int >= password_max_age_days | int }}"
+
+- name: "Evaluate | Report rotation decision"
+  ansible.builtin.debug:
+    msg: >
+      Rotation required: {{ rotation_required }}.
+      Secret age: {{ secret_age_days }} days /
+      Threshold: {{ password_max_age_days }} days.
+      {% if not rotation_required | bool %}
+      Next rotation due in ~{{ password_max_age_days | int - secret_age_days | int }} days.
+      {% endif %}
+
+- name: "Evaluate | Generate new SYS password"
+  ansible.builtin.set_fact:
+    new_sys_password: >-
+      {{
+        lookup('community.general.random_string',
+          length=password_length | int,
+          min_upper=2,
+          min_lower=2,
+          min_numeric=2,
+          min_special=2,
+          special_chars='!@#%^&*_-+=')
+      }}
+  no_log: true
+  when: rotation_required | bool
+
+- name: "Evaluate | Assert new password is not identical to current password"
+  ansible.builtin.assert:
+    that:
+      - new_sys_password != current_sys_password
+    fail_msg: "Generated password is identical to the current password. Re-run the playbook."
+    success_msg: "New password is distinct from the current password."
+  no_log: true
+  when: rotation_required | bool
+
+- name: "Evaluate | Ensure break-glass directory exists"
+  ansible.builtin.file:
+    path: "{{ breakglass_backup_path }}"
+    state: directory
+    mode: '0700'
+    owner: root
+    group: root
+  become: true
+  become_user: root
+  delegate_to: "{{ node_fqdn }}"
+  when:
+    - rotation_required | bool
+    - breakglass_backup_enabled | bool
+
+- name: "Evaluate | Write break-glass backup of current password"
+  ansible.builtin.copy:
+    content: |
+      # Break-glass password backup
+      # Database    : {{ oracle_service }}
+      # DB Unique   : {{ db_unique_name }}
+      # Host        : {{ node_fqdn }}
+      # SCAN        : {{ scan_address }}
+      # Timestamp   : {{ ansible_date_time.iso8601 }}
+      # Vault Path  : {{ vault_mount_point }}/data/{{ vault_secret_path }}
+      # Vault Ver   : {{ vault_secret_current_version }}
+      # DG Detected : {{ dg_detected | default(false) }}
+      # CV Detected : {{ commvault_detected | default(false) }}
+      #
+      # This file contains the PREVIOUS SYS password before rotation.
+      # Valid until PASSWORD_ROLLOVER_TIME window expires.
+      # DELETE this file once rotation is confirmed successful.
+      #
+      SYS_PASSWORD={{ current_sys_password }}
+    dest: "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
+    mode: '0600'
+    owner: root
+    group: root
+  no_log: true
+  become: true
+  become_user: root
+  delegate_to: "{{ node_fqdn }}"
+  when:
+    - rotation_required | bool
+    - breakglass_backup_enabled | bool

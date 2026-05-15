@@ -1,0 +1,91 @@
+---
+# ------------------------------------------------------------------------------
+# rotate.yml
+# Execute SYS password rotation via dbaascli and update Vault KV2
+# When DG is detected, uses --prepareStandbyBlob to propagate to standbys
+#
+# dbaascli prompts for the new password interactively; ansible.builtin.expect
+# (backed by pexpect) feeds it. Requires pexpect >= 3.3 on the target host.
+# ------------------------------------------------------------------------------
+
+- name: "Rotate | Change SYS password via dbaascli (non-DG)"
+  ansible.builtin.expect:
+    command: >-
+      {{ dbaascli_path }} database changePassword
+      --dbname {{ oracle_db_name | default(db_unique_name) }}
+      --user SYS
+    responses:
+      '(?i)(new password|password for SYS|enter password)': "{{ new_sys_password }}"
+      '(?i)(confirm|re-enter|retype)': "{{ new_sys_password }}"
+    timeout: 120
+  register: dbaascli_result
+  no_log: true
+  become: true
+  become_user: root
+  delegate_to: "{{ node_fqdn }}"
+  changed_when: dbaascli_result.rc == 0
+  failed_when: dbaascli_result.rc != 0
+  when: not dg_detected | default(false) | bool
+
+- name: "Rotate | Change SYS password via dbaascli (DG — prepare standby blob)"
+  ansible.builtin.expect:
+    command: >-
+      {{ dbaascli_path }} database changePassword
+      --dbname {{ oracle_db_name | default(db_unique_name) }}
+      --user SYS
+      --prepareStandbyBlob true
+      --blobLocation /tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}
+    responses:
+      '(?i)(new password|password for SYS|enter password)': "{{ new_sys_password }}"
+      '(?i)(confirm|re-enter|retype)': "{{ new_sys_password }}"
+    timeout: 120
+  register: dbaascli_dg_result
+  no_log: true
+  become: true
+  become_user: root
+  delegate_to: "{{ node_fqdn }}"
+  changed_when: dbaascli_dg_result.rc == 0
+  failed_when: dbaascli_dg_result.rc != 0
+  when: dg_detected | default(false) | bool
+
+- name: "Rotate | Set dbaascli result fact"
+  ansible.builtin.set_fact:
+    dbaascli_rc: >-
+      {{
+        (dbaascli_dg_result.rc | default(-1))
+        if dg_detected | default(false) | bool
+        else (dbaascli_result.rc | default(-1))
+      }}
+
+- name: "Rotate | Confirm dbaascli completed successfully"
+  ansible.builtin.debug:
+    msg: "dbaascli password change completed successfully (RC={{ dbaascli_rc }})."
+
+- name: "Rotate | Write new password to Vault KV2 — PRIMARY"
+  community.hashi_vault.vault_kv2_put:
+    url: "{{ vault_url }}"
+    path: "{{ vault_secret_path }}"
+    mount_point: "{{ vault_mount_point }}"
+    auth_method: "{{ vault_auth_method }}"
+    role_id: "{{ vault_role_id }}"
+    secret_id: "{{ vault_secret_id }}"
+    data:
+      password: "{{ new_sys_password }}"
+      db_unique_name: "{{ db_unique_name }}"
+      db_role: "PRIMARY"
+      oracle_version: "{{ oracle_version_full | default('unknown') }}"
+      rollover_time_days: "{{ profile_limits.PASSWORD_ROLLOVER_TIME | default('unknown') }}"
+      rotated_by: "{{ ansible_user_id }}"
+      rotated_at: "{{ ansible_date_time.iso8601 }}"
+  no_log: true
+  register: vault_write_primary
+
+- name: "Rotate | Assert Vault write succeeded for PRIMARY"
+  ansible.builtin.assert:
+    that:
+      - vault_write_primary is not failed
+    fail_msg: >
+      CRITICAL: SYS password changed in DB but Vault write FAILED for PRIMARY.
+      The rollover window is active — use break-glass backup for old password.
+      Vault path: {{ vault_mount_point }}/data/{{ vault_secret_path }}
+    success_msg: "New password written to Vault for PRIMARY."

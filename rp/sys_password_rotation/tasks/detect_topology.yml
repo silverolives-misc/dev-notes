@@ -1,0 +1,194 @@
+---
+# ------------------------------------------------------------------------------
+# detect_topology.yml
+# Auto-detect Data Guard and Commvault configuration.
+# Sets facts: dg_detected, commvault_detected, dg_standby_members
+# These override the defaults/main.yml values if detection finds them.
+# ------------------------------------------------------------------------------
+
+# --- Data Guard Detection -----------------------------------------------------
+
+- name: "Topology | Query Data Guard config members"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT NVL(MAX('YES'),'NO') FROM v\$dataguard_config;
+    EXIT;
+    EOF
+  register: dg_detect_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "Topology | Query DG broker and archive log parameters"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT name ||'|'|| value
+    FROM   v\$parameter
+    WHERE  name IN ('dg_broker_start','log_archive_config','log_archive_dest_2')
+    AND    value IS NOT NULL
+    AND    value != 'DISABLE';
+    EXIT;
+    EOF
+  register: dg_params_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "Topology | Query standby redo log count"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT COUNT(*) FROM v\$standby_log;
+    EXIT;
+    EOF
+  register: standby_log_count_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "Topology | Set Data Guard detected fact"
+  ansible.builtin.set_fact:
+    dg_detected: >-
+      {{
+        (dg_detect_raw.stdout | default('') | trim == 'YES')
+        or (dg_params_raw.stdout_lines | select('match', '^[a-z_]') | list | length > 0)
+        or (standby_log_count_raw.stdout | default('0') | trim | int > 0)
+        or (dg_enabled | bool)
+      }}
+
+- name: "Topology | Query DG member details (when detected)"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT db_unique_name
+           ||'|'|| role
+           ||'|'|| enabled
+    FROM   v\$dataguard_config
+    ORDER BY role;
+    EXIT;
+    EOF
+  register: dg_members_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: dg_detected | bool
+
+- name: "Topology | Parse DG member list"
+  ansible.builtin.set_fact:
+    dg_standby_members: >-
+      {{
+        dg_members_raw.stdout_lines
+        | default([])
+        | select('match', '^[A-Z_]')
+        | map('split', '|')
+        | map('map', 'trim')
+        | selectattr(1, 'ne', 'PRIMARY')
+        | list
+      }}
+  when: dg_detected | bool
+
+# --- Commvault Detection ------------------------------------------------------
+
+- name: "Topology | Check Commvault registry path exists"
+  ansible.builtin.stat:
+    path: "{{ commvault_registry_path }}"
+  register: commvault_registry_stat
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+  failed_when: false
+
+- name: "Topology | Check for Commvault cvd process"
+  ansible.builtin.shell: |
+    pgrep -x {{ commvault_process_name }} > /dev/null 2>&1 && echo 'YES' || echo 'NO'
+  register: commvault_process_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+  changed_when: false
+  failed_when: false
+
+- name: "Topology | Check for Commvault simpana binary"
+  ansible.builtin.stat:
+    path: "/usr/bin/simpana"
+  register: commvault_simpana_stat
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+  failed_when: false
+
+- name: "Topology | Check RMAN backup history for SBT (Commvault) device type"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT {{ sqlplus_connect }}
+    SELECT NVL(MAX('YES'),'NO')
+    FROM   v\$rman_backup_job_details
+    WHERE  output_device_type = 'SBT_TAPE'
+    AND    start_time > SYSDATE - 30;
+    EXIT;
+    EOF
+  register: commvault_rman_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: "Topology | Set Commvault detected fact"
+  ansible.builtin.set_fact:
+    commvault_detected: >-
+      {{
+        commvault_registry_stat.stat.exists
+        or (commvault_process_raw.stdout | default('NO') | trim == 'YES')
+        or commvault_simpana_stat.stat.exists
+        or (commvault_rman_raw.stdout | default('NO') | trim == 'YES')
+        or (commvault_enabled | bool)
+      }}
+
+# --- Display Topology Summary -------------------------------------------------
+
+- name: "Topology | Display detected topology"
+  ansible.builtin.debug:
+    msg:
+      - "======================================"
+      - " Topology Detection Summary"
+      - "======================================"
+      - "Data Guard detected  : {{ dg_detected | default(false) }}"
+      - "Commvault detected   : {{ commvault_detected | default(false) }}"
+      - "DG Standby members   : {{ dg_standby_members | default([]) | map(attribute=0) | list }}"
+      - "======================================"
+
+- name: "Topology | Warn if Data Guard detected but no standby members found"
+  ansible.builtin.debug:
+    msg: >
+      WARNING: Data Guard appears configured but no standby members were
+      returned from v$dataguard_config. The DG broker may not be enabled.
+      Verify manually before proceeding.
+  when:
+    - dg_detected | bool
+    - dg_standby_members | default([]) | length == 0
