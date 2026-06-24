@@ -5,34 +5,31 @@
 # ------------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------------
-# Vault connection
+# Vault custom static database secrets engine
 # ------------------------------------------------------------------------------
-vault_url: "https://vault.example.com:8200"
-vault_auth_method: "approle"
-vault_mount_point: "secret"
-vault_role_id: ""
-vault_secret_id: ""
-
-# Vault path is constructed from inventory hostvars set by the driving playbook
-# e.g. prod/exacc/uk-london-1/FINDB_PRIMARY/sys
-vault_secret_path: "{{ environment }}/exacc/{{ region }}/{{ db_unique_name }}/sys"
+vault_engine_url:       ""                            # e.g. https://vault.example.com:8200
+vault_engine_mount:     "secrets/static-database"     # custom engine mount point
+vault_namespace:        ""                            # X-Vault-Namespace header value
+vault_token_ttl:        "6h"                          # TTL for the login token
 
 # ------------------------------------------------------------------------------
 # Rotation policy
 # ------------------------------------------------------------------------------
-password_max_age_days: 90
-password_min_age_days: 1
-password_length: 20
+password_max_age_days:    90
+password_min_age_days:    1
+password_length:          20
 
 # Minimum PASSWORD_ROLLOVER_TIME expected (days). 1/24 = 1 hour.
 min_rollover_time_days: "{{ 1 / 24 }}"
 
 # ------------------------------------------------------------------------------
-# Oracle connection
+# Oracle connection — scan_address, oracle_port, oracle_service and oracle_home
+# are set dynamically by detect_topology.yml from dbaascli config getDatabases.
+# The values here are fallback defaults only.
 # ------------------------------------------------------------------------------
-oracle_port: 1521
+oracle_port:    1521
 oracle_service: "{{ db_unique_name }}"
-oracle_home: "/u01/app/oracle/product/19.0.0/dbhome_1"
+oracle_home:    "/u01/app/oracle/product/19.0.0.0/dbhome_1"
 
 # dbaascli
 dbaascli_path: "/usr/local/bin/dbaascli"
@@ -40,41 +37,35 @@ dbaascli_path: "/usr/local/bin/dbaascli"
 # ------------------------------------------------------------------------------
 # Pre-check thresholds
 # ------------------------------------------------------------------------------
-dg_max_lag_seconds: 300
+dg_max_lag_seconds:           300
 sys_session_warning_threshold: 5
-fail_on_active_rman: true
+fail_on_active_rman:          true
 
 # ------------------------------------------------------------------------------
 # Topology overrides
-# These are auto-detected but can be forced via extra-vars if needed
+# Auto-detected via dbaascli — can be forced via extra-vars if needed
 # ------------------------------------------------------------------------------
-dg_enabled: false
+dg_enabled:        false
 commvault_enabled: false
-
-# ------------------------------------------------------------------------------
-# Data Guard standby path in Vault
-# Only used when DG is detected — built from standby db_unique_name
-# ------------------------------------------------------------------------------
-dg_standby_vault_path: "{{ environment }}/exacc/{{ dg_standby_region | default(region) }}/{{ dg_standby_db_unique_name | default('') }}/sys"
 
 # ------------------------------------------------------------------------------
 # Commvault settings
 # ------------------------------------------------------------------------------
-commvault_registry_path: "/etc/CommVaultRegistry"
-commvault_process_name: "cvd"
-commvault_ora_user: "sysbackup"        # DB user Commvault connects as (adjust for your env)
-commvault_notify_only: true            # true = warn only; false = attempt credential update
+commvault_registry_path:    "/etc/CommVaultRegistry"
+commvault_process_name:     "cvd"
+commvault_ora_user:         "sysbackup"
+commvault_notify_only:      true
 commvault_notification_log: "/var/log/ansible/commvault_rotation_notice.log"
 
 # ------------------------------------------------------------------------------
 # Break-glass
 # ------------------------------------------------------------------------------
 breakglass_backup_enabled: true
-breakglass_backup_path: "/etc/oracle/breakglass"
+breakglass_backup_path:    "/etc/oracle/breakglass"
 
 # ------------------------------------------------------------------------------
 # Notifications
 # ------------------------------------------------------------------------------
-notify_on_skip: true
+notify_on_skip:    true
 notify_on_success: true
 notify_on_failure: true

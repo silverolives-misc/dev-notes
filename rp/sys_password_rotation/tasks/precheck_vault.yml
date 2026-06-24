@@ -1,51 +1,31 @@
 ---
 # ------------------------------------------------------------------------------
 # precheck_vault.yml
-# Validate Vault connectivity, permissions, and read current secret metadata
+# Validate connectivity to the custom Vault static database engine and confirm
+# the role exists with the expected structure.
+#
+# current_sys_password and secret_age_days are supplied as hostvars by the
+# playbook (sourced from the role metadata GET in Phase 1).
+#
+# The pre-rotation GET captures last_vault_rotation so post_validate.yml can
+# confirm the timestamp advanced after the password write-back.
 # ------------------------------------------------------------------------------
 
-- name: "Vault Pre-check | Retrieve KV2 secret metadata"
-  community.hashi_vault.vault_read:
-    url: "{{ vault_url }}"
-    path: "{{ vault_mount_point }}/metadata/{{ vault_secret_path }}"
-    auth_method: "{{ vault_auth_method }}"
-    role_id: "{{ vault_role_id }}"
-    secret_id: "{{ vault_secret_id }}"
-  register: vault_metadata_raw
-  failed_when: false
-  no_log: true
-
-- name: "Vault Pre-check | Assert Vault is reachable and path exists"
+- name: "Vault Pre-check | Assert credential hostvars were supplied by playbook"
   ansible.builtin.assert:
     that:
-      - vault_metadata_raw is not failed
-      - vault_metadata_raw.data is defined
+      - current_sys_password is defined
+      - current_sys_password | length > 0
+      - secret_age_days is defined
+      - login_token is defined
+      - login_token | length > 0
+      - vault_role_name is defined
     fail_msg: >
-      Cannot reach Vault or secret path
-      '{{ vault_mount_point }}/metadata/{{ vault_secret_path }}' does not exist.
-      Ensure Vault is accessible and the secret has been initialised.
-    success_msg: "Vault is reachable and secret metadata retrieved."
-
-- name: "Vault Pre-check | Set metadata facts"
-  ansible.builtin.set_fact:
-    vault_secret_updated_time: "{{ vault_metadata_raw.data.updated_time }}"
-    vault_secret_current_version: "{{ vault_metadata_raw.data.current_version }}"
-
-- name: "Vault Pre-check | Calculate secret age in days"
-  ansible.builtin.set_fact:
-    secret_age_days: >-
-      {{
-        ((ansible_date_time.iso8601 | to_datetime('%Y-%m-%dT%H:%M:%SZ'))
-        - (vault_secret_updated_time | regex_replace('\\..*Z$', 'Z')
-        | to_datetime('%Y-%m-%dT%H:%M:%SZ'))).days
-      }}
-
-- name: "Vault Pre-check | Display secret age"
-  ansible.builtin.debug:
-    msg: >
-      Secret '{{ vault_secret_path }}' (version {{ vault_secret_current_version }})
-      last updated {{ secret_age_days }} days ago.
-      Rotation threshold: {{ password_max_age_days }} days.
+      One or more required Vault hostvars are missing (current_sys_password,
+      secret_age_days, login_token, vault_role_name).
+      Ensure Phase 1 of the playbook completed successfully.
+    success_msg: "Vault credential hostvars confirmed present."
+  no_log: true
 
 - name: "Vault Pre-check | Assert secret is not too new to rotate"
   ansible.builtin.assert:
@@ -55,34 +35,46 @@
       Password was rotated only {{ secret_age_days }} days ago
       (minimum: {{ password_min_age_days }} days). Aborting to prevent
       double-rotation.
-    success_msg: "Secret age meets minimum age requirement."
+    success_msg: >
+      Secret age {{ secret_age_days }} days meets minimum age requirement.
 
-- name: "Vault Pre-check | Read current secret data"
-  community.hashi_vault.vault_read:
-    url: "{{ vault_url }}"
-    path: "{{ vault_mount_point }}/data/{{ vault_secret_path }}"
-    auth_method: "{{ vault_auth_method }}"
-    role_id: "{{ vault_role_id }}"
-    secret_id: "{{ vault_secret_id }}"
-  register: vault_secret_raw
-  failed_when: false
+- name: "Vault Pre-check | GET role metadata from custom engine"
+  ansible.builtin.uri:
+    url:            "{{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ vault_role_name }}"
+    method:         GET
+    headers:
+      X-Vault-Namespace: "{{ vault_namespace }}"
+      X-Vault-Token:     "{{ login_token }}"
+      accept:            application/json
+    return_content: true
+    status_code:    200
+  register: vault_role_meta
   no_log: true
 
-- name: "Vault Pre-check | Assert current secret is readable"
+- name: "Vault Pre-check | Assert role is reachable and has expected fields"
   ansible.builtin.assert:
     that:
-      - vault_secret_raw is not failed
-      - vault_secret_raw.data is defined
-      - vault_secret_raw.data.data is defined
-      - vault_secret_raw.data.data.password is defined
+      - vault_role_meta.status == 200
+      - vault_role_meta.json.data is defined
+      - vault_role_meta.json.data.connection_url is defined
+      - vault_role_meta.json.data.username is defined
     fail_msg: >
-      Unable to read current secret from
-      '{{ vault_mount_point }}/data/{{ vault_secret_path }}'.
-      Check token/AppRole permissions.
-    success_msg: "Current secret is readable from Vault."
+      Cannot read role '{{ vault_role_name }}' from
+      '{{ vault_engine_mount }}/role/{{ vault_role_name }}'.
+      Check the engine mount and token permissions.
+    success_msg: "Vault role '{{ vault_role_name }}' is reachable and valid."
 
-- name: "Vault Pre-check | Set current password fact"
+- name: "Vault Pre-check | Capture pre-rotation last_vault_rotation timestamp"
   ansible.builtin.set_fact:
-    current_sys_password: "{{ vault_secret_raw.data.data.password }}"
-    vault_payload: "{{ vault_secret_raw.data.data }}"
-  no_log: true
+    vault_pre_rotation_timestamp: >-
+      {{ vault_role_meta.json.data.last_vault_rotation | default('') }}
+
+- name: "Vault Pre-check | Display rotation context"
+  ansible.builtin.debug:
+    msg:
+      - "Vault role         : {{ vault_role_name }}"
+      - "Oracle user        : {{ vault_role_meta.json.data.username }}"
+      - "ExaCC hosts        : {{ vault_role_meta.json.data.connection_url }}"
+      - "Last rotated       : {{ last_vault_rotation | default('unknown') }}"
+      - "Secret age         : {{ secret_age_days }} days"
+      - "Rotation threshold : {{ password_max_age_days }} days"

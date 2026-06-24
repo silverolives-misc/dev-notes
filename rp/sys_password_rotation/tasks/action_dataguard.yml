@@ -79,35 +79,46 @@
   loop_control:
     index_var: idx
 
-- name: "DG Action | Write new password to Vault for each standby member"
-  community.hashi_vault.vault_kv2_put:
-    url: "{{ vault_url }}"
-    path: "{{ environment }}/exacc/{{ dg_standby_region | default(region) }}/{{ item[0] }}/sys"
-    mount_point: "{{ vault_mount_point }}"
-    auth_method: "{{ vault_auth_method }}"
-    role_id: "{{ vault_role_id }}"
-    secret_id: "{{ vault_secret_id }}"
-    data:
+# ------------------------------------------------------------------------------
+# Write the new password to the custom static engine for each standby role.
+# Standby role names follow the same convention: SYS_<DB_UNIQUE_NAME>_EXACC
+# dbaascli blob propagation has already updated Oracle — this syncs Vault.
+# ------------------------------------------------------------------------------
+
+- name: "DG Action | Write new password to Vault for each standby role"
+  ansible.builtin.uri:
+    url:            "{{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/SYS_{{ item[0] }}_EXACC"
+    method:         POST
+    headers:
+      X-Vault-Namespace: "{{ vault_namespace }}"
+      X-Vault-Token:     "{{ login_token }}"
+      Content-Type:      application/json
+    body_format: json
+    body:
+      username: "SYS"
       password: "{{ new_sys_password }}"
-      db_unique_name: "{{ item[0] }}"
-      db_role: "{{ item[1] }}"
-      oracle_version: "{{ oracle_version_full | default('unknown') }}"
-      rotated_by: "{{ ansible_user_id }}"
-      rotated_at: "{{ ansible_date_time.iso8601 }}"
-      propagated_from: "{{ db_unique_name }}"
+    status_code: [200, 204]
+    return_content: true
   no_log: true
   loop: "{{ dg_standby_members }}"
+  loop_control:
+    label: "SYS_{{ item[0] }}_EXACC"
   register: vault_write_standby
 
 - name: "DG Action | Assert Vault writes succeeded for all standbys"
   ansible.builtin.assert:
     that:
-      - item is not failed
+      - item.status in [200, 204]
     fail_msg: >
-      CRITICAL: Vault write failed for standby member {{ dg_standby_members[idx][0] }}.
+      CRITICAL: Vault write failed for standby role
+      'SYS_{{ dg_standby_members[idx][0] }}_EXACC'
+      (HTTP {{ item.status }}).
       The DB password was updated but Vault is out of sync.
-      Update manually: {{ vault_mount_point }}/data/{{ environment }}/exacc/{{ dg_standby_region | default(region) }}/{{ dg_standby_members[idx][0] }}/sys
-    success_msg: "Vault updated for standby {{ dg_standby_members[idx][0] }}."
+      Update manually via:
+      POST {{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/SYS_{{ dg_standby_members[idx][0] }}_EXACC
+    success_msg: >
+      Vault updated for standby role 'SYS_{{ dg_standby_members[idx][0] }}_EXACC'
+      (HTTP {{ item.status }}).
   loop: "{{ vault_write_standby.results }}"
   loop_control:
     index_var: idx
@@ -135,4 +146,4 @@
       - "Data Guard rotation complete."
       - "Primary updated  : {{ db_unique_name }}"
       - "Standbys updated : {{ dg_standby_members | map(attribute=0) | list }}"
-      - "Vault updated for: {{ ([db_unique_name] + dg_standby_members | map(attribute=0) | list) }}"
+      - "Vault roles updated: {{ (['SYS_' + db_unique_name + '_EXACC'] + dg_standby_members | map(attribute=0) | map('regex_replace', '^(.*)$', 'SYS_\\1_EXACC') | list) }}"

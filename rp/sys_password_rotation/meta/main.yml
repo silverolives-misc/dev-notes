@@ -5,8 +5,8 @@ galaxy_info:
   description: >
     SYS password rotation for Oracle databases on ExaCC.
     Detects topology (Data Guard, Commvault) and takes appropriate
-    action for each. Stores passwords in HashiCorp Vault KV2 and
-    uses secret metadata to determine if rotation is required.
+    action for each. Stores passwords in a custom HashiCorp Vault
+    static database secrets engine via ansible.builtin.uri.
   license: MIT
   min_ansible_version: "2.14"
   platforms:
@@ -16,4 +16,4 @@ galaxy_info:
         - "9"
 
 dependencies:
-  - community.hashi_vault
+  - community.general

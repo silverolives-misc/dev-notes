@@ -6,7 +6,7 @@
 
 - name: "Evaluate | Determine if rotation is required"
   ansible.builtin.set_fact:
-    rotation_required: "{{ secret_age_days | int >= password_max_age_days | int }}"
+    rotation_required: "{{ secret_age_days | float >= password_max_age_days | int }}"
 
 - name: "Evaluate | Report rotation decision"
   ansible.builtin.debug:
@@ -15,7 +15,7 @@
       Secret age: {{ secret_age_days }} days /
       Threshold: {{ password_max_age_days }} days.
       {% if not rotation_required | bool %}
-      Next rotation due in ~{{ password_max_age_days | int - secret_age_days | int }} days.
+      Next rotation due in ~{{ (password_max_age_days | int - secret_age_days | float) | round(1) }} days.
       {% endif %}
 
 - name: "Evaluate | Generate new SYS password"
@@ -65,8 +65,7 @@
       # Host        : {{ node_fqdn }}
       # SCAN        : {{ scan_address }}
       # Timestamp   : {{ ansible_date_time.iso8601 }}
-      # Vault Path  : {{ vault_mount_point }}/data/{{ vault_secret_path }}
-      # Vault Ver   : {{ vault_secret_current_version }}
+      # Vault Role  : {{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ vault_role_name }}
       # DG Detected : {{ dg_detected | default(false) }}
       # CV Detected : {{ commvault_detected | default(false) }}
       #

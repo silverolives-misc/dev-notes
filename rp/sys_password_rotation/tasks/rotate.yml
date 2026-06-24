@@ -61,31 +61,38 @@
   ansible.builtin.debug:
     msg: "dbaascli password change completed successfully (RC={{ dbaascli_rc }})."
 
-- name: "Rotate | Write new password to Vault KV2 — PRIMARY"
-  community.hashi_vault.vault_kv2_put:
-    url: "{{ vault_url }}"
-    path: "{{ vault_secret_path }}"
-    mount_point: "{{ vault_mount_point }}"
-    auth_method: "{{ vault_auth_method }}"
-    role_id: "{{ vault_role_id }}"
-    secret_id: "{{ vault_secret_id }}"
-    data:
-      password: "{{ new_sys_password }}"
-      db_unique_name: "{{ db_unique_name }}"
-      db_role: "PRIMARY"
-      oracle_version: "{{ oracle_version_full | default('unknown') }}"
-      rollover_time_days: "{{ profile_limits.PASSWORD_ROLLOVER_TIME | default('unknown') }}"
-      rotated_by: "{{ ansible_user_id }}"
-      rotated_at: "{{ ansible_date_time.iso8601 }}"
-  no_log: true
-  register: vault_write_primary
+# ------------------------------------------------------------------------------
+# Write the new password back to the custom static database secrets engine.
+# POST /v1/<mount>/role/<role_name> with username + password body.
+# The engine records the write timestamp in last_vault_rotation.
+# ------------------------------------------------------------------------------
 
-- name: "Rotate | Assert Vault write succeeded for PRIMARY"
+- name: "Rotate | Write new password to Vault custom static engine"
+  ansible.builtin.uri:
+    url:            "{{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ vault_role_name }}"
+    method:         POST
+    headers:
+      X-Vault-Namespace: "{{ vault_namespace }}"
+      X-Vault-Token:     "{{ login_token }}"
+      Content-Type:      application/json
+    body_format: json
+    body:
+      username: "{{ vault_role_name | split('_') | first }}"
+      password: "{{ new_sys_password }}"
+    status_code: [200, 204]
+    return_content: true
+  register: vault_write_result
+  no_log: true
+
+- name: "Rotate | Assert Vault write succeeded"
   ansible.builtin.assert:
     that:
-      - vault_write_primary is not failed
+      - vault_write_result.status in [200, 204]
     fail_msg: >
-      CRITICAL: SYS password changed in DB but Vault write FAILED for PRIMARY.
+      CRITICAL: SYS password changed in Oracle but Vault write FAILED
+      (HTTP {{ vault_write_result.status }}) for role '{{ vault_role_name }}'.
       The rollover window is active — use break-glass backup for old password.
-      Vault path: {{ vault_mount_point }}/data/{{ vault_secret_path }}
-    success_msg: "New password written to Vault for PRIMARY."
+      Engine: {{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ vault_role_name }}
+    success_msg: >
+      New password written to Vault engine for role '{{ vault_role_name }}'
+      (HTTP {{ vault_write_result.status }}).

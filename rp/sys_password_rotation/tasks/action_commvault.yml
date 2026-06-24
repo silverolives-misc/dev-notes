@@ -62,8 +62,8 @@
         qoperation execscript -sn QS_UpdateOracleInstanceCredentials \
           -si [client_name] -si [instance_name]
 
-      Vault Path (new password):
-        {{ vault_mount_point }}/data/{{ vault_secret_path }}
+      Vault Role (new password):
+        {{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ vault_role_name }}
 
       If Commvault backup fails after this date the old password will no longer
       be valid and manual credential recovery will be required.

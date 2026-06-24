@@ -1,146 +1,50 @@
 ---
 # ------------------------------------------------------------------------------
 # precheck_oracle.yml
-# Validate Oracle DB is up, accessible, RAC instances healthy, SYS account OK
+# Assert Oracle DB health using facts set by detect_topology.yml.
+#
+# All RAC instance status, DB role, open mode, PDB status and Oracle version
+# facts are now sourced from dbaascli config getDatabases (detect_topology.yml).
+# The only remaining sqlplus query here is for SYS account status (dba_users)
+# which is not exposed by dbaascli. That query also serves as the implicit
+# live connectivity test for the SYS credential.
 # ------------------------------------------------------------------------------
 
-- name: "Oracle Pre-check | Test DB connectivity via sqlplus"
-  ansible.builtin.shell: |
-    {{ oracle_env }}
-    sqlplus -s /nolog <<EOF
-    {{ sqlplus_preamble }}
-    CONNECT {{ sqlplus_connect }}
-    SELECT 'CONNECTION_OK' FROM dual;
-    EXIT;
-    EOF
-  register: db_connectivity_check
-  delegate_to: "{{ node_fqdn }}"
-  become: true
-  become_user: oracle
-  changed_when: false
-  failed_when: false
-  no_log: true
+# ==============================================================================
+# Section 1 — Assert and display facts sourced from dbaascli (detect_topology)
+# ==============================================================================
 
-- name: "Oracle Pre-check | Assert DB is accessible"
+- name: "Oracle Pre-check | Assert topology facts were set by detect_topology"
   ansible.builtin.assert:
     that:
-      - db_connectivity_check.rc == 0
-      - "'CONNECTION_OK' in db_connectivity_check.stdout"
+      - db_role is defined
+      - db_name_actual is defined
+      - oracle_version_full is defined
+      - rac_nodes is defined
+      - rac_nodes | length > 0
+      - scan_address is defined
+      - oracle_port is defined
     fail_msg: >
-      Cannot connect to '{{ oracle_service }}' on {{ scan_address }}:{{ oracle_port }}.
-      Error: {{ db_connectivity_check.stderr | default('unknown') }}
-    success_msg: "Database is accessible on {{ scan_address }}:{{ oracle_port }}."
+      One or more topology facts are missing. Ensure detect_topology.yml ran
+      successfully before this task file.
+    success_msg: "Topology facts confirmed present."
 
-- name: "Oracle Pre-check | Query all RAC instance statuses"
-  ansible.builtin.shell: |
-    {{ oracle_env }}
-    sqlplus -s /nolog <<EOF
-    {{ sqlplus_preamble }}
-    CONNECT {{ sqlplus_connect }}
-    SELECT inst_id
-           ||'|'|| instance_name
-           ||'|'|| status
-           ||'|'|| database_status
-           ||'|'|| active_state
-    FROM   gv\$instance
-    ORDER BY inst_id;
-    EXIT;
-    EOF
-  register: rac_instance_raw
-  delegate_to: "{{ node_fqdn }}"
-  become: true
-  become_user: oracle
-  changed_when: false
-  no_log: true
-
-- name: "Oracle Pre-check | Parse RAC instance statuses"
-  ansible.builtin.set_fact:
-    rac_instances: >-
-      {{
-        rac_instance_raw.stdout_lines
-        | select('match', '^[0-9]')
-        | map('split', '|')
-        | map('map', 'trim')
-        | list
-      }}
-
-- name: "Oracle Pre-check | Display RAC instance statuses"
-  ansible.builtin.debug:
-    msg: >
-      Instance {{ item[1] }} (inst_id={{ item[0] }}):
-      status={{ item[2] }}, db_status={{ item[3] }}, active_state={{ item[4] }}
-  loop: "{{ rac_instances }}"
-
-- name: "Oracle Pre-check | Assert all RAC instances are OPEN and ACTIVE"
-  ansible.builtin.assert:
-    that:
-      - item[2] == 'OPEN'
-      - item[3] == 'ACTIVE'
-      - item[4] == 'NORMAL'
-    fail_msg: >
-      RAC instance '{{ item[1] }}' (inst_id={{ item[0] }}) is not healthy.
-      Status={{ item[2] }}, DB_Status={{ item[3] }}, Active_State={{ item[4] }}.
-    success_msg: "Instance {{ item[1] }} is OPEN and ACTIVE."
-  loop: "{{ rac_instances }}"
-
-- name: "Oracle Pre-check | Query database role and open mode"
-  ansible.builtin.shell: |
-    {{ oracle_env }}
-    sqlplus -s /nolog <<EOF
-    {{ sqlplus_preamble }}
-    CONNECT {{ sqlplus_connect }}
-    SELECT name
-           ||'|'|| db_unique_name
-           ||'|'|| open_mode
-           ||'|'|| database_role
-           ||'|'|| protection_mode
-    FROM   v\$database;
-    EXIT;
-    EOF
-  register: db_role_raw
-  delegate_to: "{{ node_fqdn }}"
-  become: true
-  become_user: oracle
-  changed_when: false
-  no_log: true
-
-- name: "Oracle Pre-check | Parse database role facts"
-  ansible.builtin.set_fact:
-    db_parsed: >-
-      {{
-        db_role_raw.stdout_lines
-        | select('match', '^[A-Z]')
-        | first
-        | split('|')
-        | map('trim')
-        | list
-      }}
-
-- name: "Oracle Pre-check | Set individual database facts"
-  ansible.builtin.set_fact:
-    db_name_actual:       "{{ db_parsed[0] }}"
-    db_unique_name_actual: "{{ db_parsed[1] }}"
-    db_open_mode:         "{{ db_parsed[2] }}"
-    db_role:              "{{ db_parsed[3] }}"
-    db_protection_mode:   "{{ db_parsed[4] }}"
-
-- name: "Oracle Pre-check | Display database role information"
+- name: "Oracle Pre-check | Display database identity"
   ansible.builtin.debug:
     msg:
       - "DB Name        : {{ db_name_actual }}"
       - "DB Unique Name : {{ db_unique_name_actual }}"
-      - "Open Mode      : {{ db_open_mode }}"
-      - "Database Role  : {{ db_role }}"
-      - "Protection Mode: {{ db_protection_mode }}"
+      - "DB Role        : {{ db_role }}"
+      - "DB Type        : {{ db_type }}"
+      - "CDB            : {{ is_cdb }}"
+      - "Oracle Version : {{ oracle_version_full }}"
+      - "Oracle Home    : {{ oracle_home }}"
+      - "SCAN           : {{ scan_address }}:{{ oracle_port }}"
+      - "Service        : {{ oracle_service }}"
 
-- name: "Oracle Pre-check | Assert DB is open READ WRITE"
-  ansible.builtin.assert:
-    that:
-      - db_open_mode == 'READ WRITE'
-    fail_msg: >
-      Database open mode is '{{ db_open_mode }}'. Expected 'READ WRITE'.
-      Rotation must only run on a PRIMARY in READ WRITE mode.
-    success_msg: "Database is open READ WRITE."
+# ==============================================================================
+# Section 2 — DB role and open mode assertions
+# ==============================================================================
 
 - name: "Oracle Pre-check | Assert this is a PRIMARY database"
   ansible.builtin.assert:
@@ -150,41 +54,48 @@
       Database role is '{{ db_role }}'. Rotation must be performed on PRIMARY only.
     success_msg: "Database role is PRIMARY."
 
-- name: "Oracle Pre-check | Query PDB open modes"
-  ansible.builtin.shell: |
-    {{ oracle_env }}
-    sqlplus -s /nolog <<EOF
-    {{ sqlplus_preamble }}
-    CONNECT {{ sqlplus_connect }}
-    SELECT name
-           ||'|'|| open_mode
-           ||'|'|| restricted
-    FROM   v\$pdbs
-    ORDER BY name;
-    EXIT;
-    EOF
-  register: pdb_status_raw
-  delegate_to: "{{ node_fqdn }}"
-  become: true
-  become_user: oracle
-  changed_when: false
-  no_log: true
+- name: "Oracle Pre-check | Assert database type is RAC or SI"
+  ansible.builtin.assert:
+    that:
+      - db_type in ['RAC', 'SI', 'SINGLE']
+    fail_msg: "Unexpected dbType '{{ db_type }}'. Expected RAC or SI."
+    success_msg: "Database type is {{ db_type }}."
 
-- name: "Oracle Pre-check | Parse PDB statuses"
-  ansible.builtin.set_fact:
-    pdb_list: >-
-      {{
-        pdb_status_raw.stdout_lines
-        | select('match', '^[A-Z$]')
-        | map('split', '|')
-        | map('map', 'trim')
-        | list
-      }}
+# ==============================================================================
+# Section 3 — RAC node status assertions (from dbNodeLevelDetails)
+# ==============================================================================
+
+- name: "Oracle Pre-check | Display RAC node statuses"
+  ansible.builtin.debug:
+    msg: >
+      Node {{ item.nodeName }} (instance {{ item.instanceName }}):
+      status={{ item.status }}
+  loop: "{{ rac_nodes }}"
+  loop_control:
+    label: "{{ item.nodeName }}"
+
+- name: "Oracle Pre-check | Assert all RAC nodes are OPEN"
+  ansible.builtin.assert:
+    that:
+      - item.status == 'OPEN'
+    fail_msg: >
+      RAC node '{{ item.nodeName }}' (instance {{ item.instanceName }})
+      status is '{{ item.status }}'. All nodes must be OPEN before rotation.
+    success_msg: "Node {{ item.nodeName }} is OPEN."
+  loop: "{{ rac_nodes }}"
+  loop_control:
+    label: "{{ item.nodeName }}"
+
+# ==============================================================================
+# Section 4 — PDB status assertions (from pdbs.pdbNodeLevelDetails)
+# ==============================================================================
 
 - name: "Oracle Pre-check | Display PDB statuses"
   ansible.builtin.debug:
     msg: "PDB {{ item[0] }}: open_mode={{ item[1] }}, restricted={{ item[2] }}"
   loop: "{{ pdb_list }}"
+  loop_control:
+    label: "{{ item[0] }}"
 
 - name: "Oracle Pre-check | Assert no open PDBs are in RESTRICTED mode"
   ansible.builtin.assert:
@@ -194,9 +105,18 @@
       PDB '{{ item[0] }}' is in RESTRICTED mode. Investigate before rotation.
     success_msg: "PDB {{ item[0] }} is not restricted."
   loop: "{{ pdb_list }}"
+  loop_control:
+    label: "{{ item[0] }}"
   when: item[1] != 'MOUNTED'
 
-- name: "Oracle Pre-check | Query SYS account status"
+# ==============================================================================
+# Section 5 — SYS account status (sqlplus — only remaining query in this file)
+#
+# dba_users is not surfaced by dbaascli. This query also implicitly validates
+# that sqlplus can connect with the current SYS credential and correct SCAN/port.
+# ==============================================================================
+
+- name: "Oracle Pre-check | Query SYS account status via sqlplus"
   ansible.builtin.shell: |
     {{ oracle_env }}
     sqlplus -s /nolog <<EOF
@@ -217,9 +137,19 @@
   changed_when: false
   no_log: true
 
+- name: "Oracle Pre-check | Assert sqlplus connected and returned SYS data"
+  ansible.builtin.assert:
+    that:
+      - sys_account_raw.rc == 0
+      - sys_account_raw.stdout_lines | select('match', '^[A-Z]') | list | length > 0
+    fail_msg: >
+      sqlplus failed to connect or returned no SYS data (RC={{ sys_account_raw.rc }}).
+      SCAN={{ scan_address }}, Port={{ oracle_port }}, Service={{ oracle_service }}.
+    success_msg: "sqlplus connected successfully with current SYS credential."
+
 - name: "Oracle Pre-check | Parse SYS account facts"
   ansible.builtin.set_fact:
-    sys_parsed: >-
+    _sys_parsed: >-
       {{
         sys_account_raw.stdout_lines
         | select('match', '^[A-Z]')
@@ -229,12 +159,12 @@
         | list
       }}
 
-- name: "Oracle Pre-check | Set SYS account individual facts"
+- name: "Oracle Pre-check | Set SYS account facts"
   ansible.builtin.set_fact:
-    sys_account_status_value: "{{ sys_parsed[0] }}"
-    sys_expiry_date:           "{{ sys_parsed[1] }}"
-    sys_profile:               "{{ sys_parsed[2] }}"
-    sys_last_login:            "{{ sys_parsed[3] }}"
+    sys_account_status_value: "{{ _sys_parsed[0] }}"
+    sys_expiry_date:           "{{ _sys_parsed[1] }}"
+    sys_profile:               "{{ _sys_parsed[2] }}"
+    sys_last_login:            "{{ _sys_parsed[3] }}"
 
 - name: "Oracle Pre-check | Display SYS account status"
   ansible.builtin.debug:

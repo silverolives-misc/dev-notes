@@ -1,79 +1,151 @@
 ---
 # ------------------------------------------------------------------------------
 # detect_topology.yml
-# Auto-detect Data Guard and Commvault configuration.
-# Sets facts: dg_detected, commvault_detected, dg_standby_members
-# These override the defaults/main.yml values if detection finds them.
+# Runs dbaascli config getDatabases once to derive the full topology.
+#
+# Replaces all sqlplus-based topology detection:
+#   - v$dataguard_config / v$parameter / v$standby_log  → dgEnabled field
+#   - gv$instance (RAC node status)                     → dbNodeLevelDetails
+#   - v$database  (role, open mode)                     → dbRole / dbType
+#   - v$pdbs      (PDB open mode + restricted)          → pdbs.pdbNodeLevelDetails
+#   - v$instance  (Oracle version)                      → patchVersion
+#   - oracle_home / scan_address / oracle_port          → derived from output
+#
+# Standby member details still require sqlplus (v$dataguard_config)
+# as the dbaascli output only indicates dgEnabled not member hostnames.
+# Commvault detection uses OS-level file/process checks (unchanged).
+#
+# Facts set by this file consumed downstream:
+#   db_name_actual, db_unique_name_actual, db_domain
+#   db_role, db_type, is_cdb
+#   oracle_version_full, oracle_major_version
+#   oracle_home, scan_address, oracle_port, oracle_service
+#   dg_detected, commvault_detected
+#   rac_nodes      — list of dbNodeLevelDetails dicts (nodeName,instanceName,status,homePath)
+#   pdb_list       — list of [pdb_name, open_mode, restricted_str] tuples
+#   dg_standby_members — list of [db_unique_name, role, enabled] (when dg_detected)
 # ------------------------------------------------------------------------------
 
-# --- Data Guard Detection -----------------------------------------------------
+# ==============================================================================
+# Section 1 — dbaascli config getDatabases
+# ==============================================================================
 
-- name: "Topology | Query Data Guard config members"
-  ansible.builtin.shell: |
-    {{ oracle_env }}
-    sqlplus -s /nolog <<EOF
-    {{ sqlplus_preamble }}
-    CONNECT {{ sqlplus_connect }}
-    SELECT NVL(MAX('YES'),'NO') FROM v\$dataguard_config;
-    EXIT;
-    EOF
-  register: dg_detect_raw
-  delegate_to: "{{ node_fqdn }}"
+- name: "Topology | Run dbaascli config getDatabases"
+  ansible.builtin.command:
+    cmd: "{{ dbaascli_path }} config getDatabases --dbname {{ oracle_db_name | default(db_unique_name) }}"
+  register: _dbaascli_config_raw
   become: true
-  become_user: oracle
-  changed_when: false
-  failed_when: false
-  no_log: true
-
-- name: "Topology | Query DG broker and archive log parameters"
-  ansible.builtin.shell: |
-    {{ oracle_env }}
-    sqlplus -s /nolog <<EOF
-    {{ sqlplus_preamble }}
-    CONNECT {{ sqlplus_connect }}
-    SELECT name ||'|'|| value
-    FROM   v\$parameter
-    WHERE  name IN ('dg_broker_start','log_archive_config','log_archive_dest_2')
-    AND    value IS NOT NULL
-    AND    value != 'DISABLE';
-    EXIT;
-    EOF
-  register: dg_params_raw
+  become_user: root
   delegate_to: "{{ node_fqdn }}"
-  become: true
-  become_user: oracle
   changed_when: false
-  failed_when: false
-  no_log: true
 
-- name: "Topology | Query standby redo log count"
-  ansible.builtin.shell: |
-    {{ oracle_env }}
-    sqlplus -s /nolog <<EOF
-    {{ sqlplus_preamble }}
-    CONNECT {{ sqlplus_connect }}
-    SELECT COUNT(*) FROM v\$standby_log;
-    EXIT;
-    EOF
-  register: standby_log_count_raw
-  delegate_to: "{{ node_fqdn }}"
-  become: true
-  become_user: oracle
-  changed_when: false
-  failed_when: false
-  no_log: true
-
-- name: "Topology | Set Data Guard detected fact"
+- name: "Topology | Parse dbaascli JSON output"
   ansible.builtin.set_fact:
-    dg_detected: >-
+    _dbaascli_full_config: >-
       {{
-        (dg_detect_raw.stdout | default('') | trim == 'YES')
-        or (dg_params_raw.stdout_lines | select('match', '^[a-z_]') | list | length > 0)
-        or (standby_log_count_raw.stdout | default('0') | trim | int > 0)
-        or (dg_enabled | bool)
+        _dbaascli_config_raw.stdout
+        | regex_search('(?s)(\{.*\})', '\1')
+        | first
+        | from_json
       }}
 
-- name: "Topology | Query DG member details (when detected)"
+- name: "Topology | Extract config for target database"
+  ansible.builtin.set_fact:
+    _db: "{{ _dbaascli_full_config[oracle_db_name | default(db_unique_name)] }}"
+
+- name: "Topology | Assert dbaascli returned valid config for target database"
+  ansible.builtin.assert:
+    that:
+      - _db is defined
+      - _db.dbName is defined
+    fail_msg: >
+      dbaascli config getDatabases did not return a config block for
+      '{{ oracle_db_name | default(db_unique_name) }}'.
+      Check --dbname value and that dbaascli can see this database.
+    success_msg: "dbaascli config retrieved for {{ _db.dbName }}."
+
+# ==============================================================================
+# Section 2 — Core database identity and role facts
+# ==============================================================================
+
+- name: "Topology | Set database identity and role facts"
+  ansible.builtin.set_fact:
+    db_name_actual:        "{{ _db.dbName }}"
+    db_unique_name_actual: "{{ _db.dbUniqueName }}"
+    db_domain:             "{{ _db.dbDomain }}"
+    db_role:               "{{ _db.dbRole }}"
+    db_type:               "{{ _db.dbType }}"
+    is_cdb:                "{{ _db.isCDB | bool }}"
+    oracle_version_full:   "{{ _db.patchVersion }}"
+    oracle_major_version:  "{{ _db.patchVersion.split('.')[0] | int }}"
+    dg_detected:           "{{ _db.dgEnabled | bool or dg_enabled | bool }}"
+    oracle_service:        "{{ _db.dbUniqueName }}"
+
+# ==============================================================================
+# Section 3 — RAC node facts and oracle_home
+# ==============================================================================
+
+- name: "Topology | Set RAC node list and oracle_home from dbNodeLevelDetails"
+  ansible.builtin.set_fact:
+    rac_nodes: "{{ _db.dbNodeLevelDetails.values() | list }}"
+    oracle_home: "{{ (_db.dbNodeLevelDetails.values() | first).homePath }}"
+
+# ==============================================================================
+# Section 4 — SCAN address and port from pdbConnectStrings
+#
+# connectString format: "<scan>:<port>/<service>"
+# Uses the first PRIMARY connect string found across all PDBs.
+# ==============================================================================
+
+- name: "Topology | Extract first PRIMARY connect string"
+  ansible.builtin.set_fact:
+    _primary_cs: >-
+      {{
+        _db.pdbs.values()
+        | map(attribute='pdbConnectStrings')
+        | flatten
+        | selectattr('serviceRole', 'equalto', 'PRIMARY')
+        | map(attribute='connectString')
+        | first
+      }}
+
+- name: "Topology | Set SCAN address and port from connect string"
+  ansible.builtin.set_fact:
+    scan_address: "{{ _primary_cs.split(':')[0] }}"
+    oracle_port:  "{{ _primary_cs.split(':')[1].split('/')[0] }}"
+
+# ==============================================================================
+# Section 5 — PDB status list
+#
+# Builds pdb_list as [[pdb_name, open_mode, restricted_str], ...] per PDB,
+# summarised across all nodes:
+#   open_mode    = READ_WRITE if any node is READ_WRITE, else MOUNTED
+#   restricted   = YES if any node is restricted, else NO
+# ==============================================================================
+
+- name: "Topology | Build PDB status list from dbaascli"
+  ansible.builtin.set_fact:
+    pdb_list: >-
+      {{
+        pdb_list | default([]) + [[
+          item.key,
+          (item.value.pdbNodeLevelDetails.values()
+           | selectattr('openMode', 'equalto', 'READ_WRITE') | list | length > 0)
+          | ternary('READ_WRITE', 'MOUNTED'),
+          (item.value.pdbNodeLevelDetails.values()
+           | selectattr('restricted', 'equalto', true) | list | length > 0)
+          | ternary('YES', 'NO')
+        ]]
+      }}
+  loop: "{{ _db.pdbs | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+# ==============================================================================
+# Section 6 — Data Guard standby member details (sqlplus only — not in dbaascli)
+# ==============================================================================
+
+- name: "Topology | Query DG standby member details from v$dataguard_config"
   ansible.builtin.shell: |
     {{ oracle_env }}
     sqlplus -s /nolog <<EOF
@@ -86,7 +158,7 @@
     ORDER BY role;
     EXIT;
     EOF
-  register: dg_members_raw
+  register: _dg_members_raw
   delegate_to: "{{ node_fqdn }}"
   become: true
   become_user: oracle
@@ -95,11 +167,11 @@
   no_log: true
   when: dg_detected | bool
 
-- name: "Topology | Parse DG member list"
+- name: "Topology | Parse DG standby member list"
   ansible.builtin.set_fact:
     dg_standby_members: >-
       {{
-        dg_members_raw.stdout_lines
+        _dg_members_raw.stdout_lines
         | default([])
         | select('match', '^[A-Z_]')
         | map('split', '|')
@@ -109,7 +181,9 @@
       }}
   when: dg_detected | bool
 
-# --- Commvault Detection ------------------------------------------------------
+# ==============================================================================
+# Section 7 — Commvault detection (OS-level checks, unchanged)
+# ==============================================================================
 
 - name: "Topology | Check Commvault registry path exists"
   ansible.builtin.stat:
@@ -170,24 +244,37 @@
         or (commvault_enabled | bool)
       }}
 
-# --- Display Topology Summary -------------------------------------------------
+# ==============================================================================
+# Section 8 — Topology summary
+# ==============================================================================
 
 - name: "Topology | Display detected topology"
   ansible.builtin.debug:
     msg:
-      - "======================================"
+      - "============================================="
       - " Topology Detection Summary"
-      - "======================================"
-      - "Data Guard detected  : {{ dg_detected | default(false) }}"
-      - "Commvault detected   : {{ commvault_detected | default(false) }}"
-      - "DG Standby members   : {{ dg_standby_members | default([]) | map(attribute=0) | list }}"
-      - "======================================"
+      - "============================================="
+      - "DB Name          : {{ db_name_actual }}"
+      - "DB Unique Name   : {{ db_unique_name_actual }}"
+      - "DB Role          : {{ db_role }}"
+      - "DB Type          : {{ db_type }}"
+      - "Oracle Version   : {{ oracle_version_full }}"
+      - "Oracle Home      : {{ oracle_home }}"
+      - "SCAN Address     : {{ scan_address }}"
+      - "Port             : {{ oracle_port }}"
+      - "Service          : {{ oracle_service }}"
+      - "Data Guard       : {{ dg_detected }}"
+      - "DG Standbys      : {{ dg_standby_members | default([]) | map(attribute=0) | list }}"
+      - "Commvault        : {{ commvault_detected }}"
+      - "RAC Nodes        : {{ rac_nodes | map(attribute='nodeName') | list }}"
+      - "PDBs             : {{ pdb_list | map(attribute=0) | list }}"
+      - "============================================="
 
-- name: "Topology | Warn if Data Guard detected but no standby members found"
+- name: "Topology | Warn if DG detected but no standby members found"
   ansible.builtin.debug:
     msg: >
-      WARNING: Data Guard appears configured but no standby members were
-      returned from v$dataguard_config. The DG broker may not be enabled.
+      WARNING: dgEnabled=true but no standby members returned from
+      v$dataguard_config. The DG broker may not be active.
       Verify manually before proceeding.
   when:
     - dg_detected | bool

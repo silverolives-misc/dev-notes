@@ -60,27 +60,40 @@
       SYS account is locked post-rotation: {{ post_status_raw.stdout | trim }}.
     success_msg: "SYS account status post-rotation: {{ post_status_raw.stdout | trim }}."
 
-- name: "Post-validate | Verify Vault metadata version incremented"
-  community.hashi_vault.vault_read:
-    url: "{{ vault_url }}"
-    path: "{{ vault_mount_point }}/metadata/{{ vault_secret_path }}"
-    auth_method: "{{ vault_auth_method }}"
-    role_id: "{{ vault_role_id }}"
-    secret_id: "{{ vault_secret_id }}"
-  register: vault_post_metadata
+# ------------------------------------------------------------------------------
+# Read the role back from the custom static engine and confirm that
+# last_vault_rotation has advanced beyond the timestamp captured in
+# precheck_vault.yml (vault_pre_rotation_timestamp).
+# ------------------------------------------------------------------------------
+
+- name: "Post-validate | GET role from Vault custom static engine"
+  ansible.builtin.uri:
+    url:            "{{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ vault_role_name }}"
+    method:         GET
+    headers:
+      X-Vault-Namespace: "{{ vault_namespace }}"
+      X-Vault-Token:     "{{ login_token }}"
+      accept:            application/json
+    return_content: true
+    status_code:    200
+  register: vault_post_role
   no_log: true
 
-- name: "Post-validate | Assert Vault version incremented"
+- name: "Post-validate | Assert Vault role reflects the rotation"
   ansible.builtin.assert:
     that:
-      - vault_post_metadata.data.current_version | int > vault_secret_current_version | int
+      - vault_post_role.status == 200
+      - vault_post_role.json.data.last_vault_rotation is defined
+      - vault_post_role.json.data.last_vault_rotation != vault_pre_rotation_timestamp | default('')
     fail_msg: >
-      Vault version did not increment.
-      Before={{ vault_secret_current_version }},
-      After={{ vault_post_metadata.data.current_version }}.
+      Vault last_vault_rotation has not changed after rotation.
+      Pre-rotation value: {{ vault_pre_rotation_timestamp | default('unknown') }}.
+      Current value: {{ vault_post_role.json.data.last_vault_rotation | default('absent') }}.
+      The password may not have been written successfully.
     success_msg: >
-      Vault version incremented from {{ vault_secret_current_version }}
-      to {{ vault_post_metadata.data.current_version }}.
+      Vault rotation confirmed: last_vault_rotation updated from
+      '{{ vault_pre_rotation_timestamp | default('(none)') }}'
+      to '{{ vault_post_role.json.data.last_vault_rotation }}'.
 
 - name: "Post-validate | Remove break-glass backup after confirmed success"
   ansible.builtin.file:
@@ -106,12 +119,12 @@
       - "Account Status  : {{ post_status_raw.stdout | trim }}"
       - "DG Detected     : {{ dg_detected | default(false) }}"
       - "CV Detected     : {{ commvault_detected | default(false) }}"
-      - "Vault Path      : {{ vault_mount_point }}/data/{{ vault_secret_path }}"
-      - "Vault Version   : {{ vault_post_metadata.data.current_version }}"
-      - "Updated Time    : {{ vault_post_metadata.data.updated_time }}"
+      - "Vault Role      : {{ vault_role_name }}"
+      - "Vault Engine    : {{ vault_engine_url }}/v1/{{ vault_engine_mount }}"
+      - "Last Rotated    : {{ vault_post_role.json.data.last_vault_rotation | default(ansible_date_time.iso8601) }}"
       - "Rotated At      : {{ ansible_date_time.iso8601 }}"
       - "Rotated By      : {{ ansible_user_id }}"
       - "============================================="
       - "{% if commvault_detected | default(false) %}ACTION: Update Commvault credentials — see {{ commvault_notification_log }}{% endif %}"
-      - "{% if dg_detected | default(false) %}DG standbys updated: {{ dg_standby_members | default([]) | map(attribute=0) | list }}{% endif %}"
+      - "{% if dg_detected | default(false) %}DG standbys updated via dbaascli blob propagation{% endif %}"
       - "============================================="
