@@ -1,0 +1,17 @@
+- name: Query Patroni API on each cluster member
+  ansible.builtin.set_fact:
+    patroni_api_results: >-
+      {{
+        patroni_api_results | default([]) +
+        [{
+          'item': item,
+          'json': lookup(
+            'ansible.builtin.url',
+            patroni_api_scheme ~ '://' ~ (hostvars[item].ansible_host | default(item)) ~ ':' ~ patroni_api_port ~ '/patroni',
+            validate_certs=False,
+            split_lines=False
+          ) | from_json
+        }]
+      }}
+  loop: "{{ groups[patroni_inventory_group] }}"
+  when: postgres_minor_upgrade_enabled | bool
