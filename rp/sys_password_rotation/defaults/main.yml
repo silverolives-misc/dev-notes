@@ -13,6 +13,31 @@ vault_namespace:        ""                            # X-Vault-Namespace header
 vault_token_ttl:        "6h"                          # TTL for the login token
 
 # ------------------------------------------------------------------------------
+# Large-estate tuning (Phase 1 discovery)
+# ------------------------------------------------------------------------------
+
+# Max simultaneous Vault API calls during metadata reads.
+# throttle: limits the number of in-flight HTTP requests to Vault.
+# Increase if Vault can handle higher concurrency; decrease to protect Vault.
+vault_api_concurrency: 25
+
+# Rotation parallelism in Phase 2 (maps to Ansible serial:).
+# DG standbys are excluded at discovery, so raising this is safe for Oracle.
+# Cap at the ansible.cfg 'forks' value. Accepts integers or percentages ("10%").
+rotation_serial: 1
+
+# Regex patterns (OR-combined) matched against db_unique_name to identify
+# DG standby databases. Matching roles are excluded from rotation_targets.
+# Their Vault role password is updated as a side-effect of primary rotation
+# (action_dataguard.yml). Adjust to your naming conventions.
+# Common Oracle DG standby name suffixes: DR, STB, SBY, DG, STB01, DR1
+standby_name_patterns:
+  - ".*DR\\d*$"
+  - ".*STB\\d*$"
+  - ".*SBY\\d*$"
+  - ".*DG\\d*$"
+
+# ------------------------------------------------------------------------------
 # Rotation policy
 # ------------------------------------------------------------------------------
 password_max_age_days:    90
