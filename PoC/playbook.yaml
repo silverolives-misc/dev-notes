@@ -1,148 +1,182 @@
 ---
-# Normal deployment path:
-#   Runs grafana_alloy, housekeep and postgresql roles when postgres_minor_upgrade is false or undefined.
-# Minor upgrade path:
-#   Skips normal roles, discovers Patroni roles from the controller, builds an in-memory
-#   rolling inventory, then runs postgres_upgrade with serial: 1.
+# Playbook: Patroni-aware PostgreSQL minor upgrade
+#
+# Flow:
+#   Play 1 - normal path when postgres_minor_upgrade_enabled is false
+#   Play 2 - discovery runs on each Patroni node and stores host facts
+#   Play 3 - build in-memory inventory from hostvars
+#   Play 4 - rolling upgrade using the generated in-memory group
+#
+# Expected variables:
+#   postgres_minor_upgrade_enabled: true|false
+#   patroni_inventory_group: name of the inventory group containing Patroni nodes
+#   patroni_api_scheme: http or https, defaults to http
+#   patroni_api_port: defaults to 8008
+#   patroni_api_host: optional per-host override for the API listener IP
 
-- name: Normal PostgreSQL deployment
+# -------------------------------------------------------------------
+# Play 1 - Normal path when rolling upgrade is disabled
+# -------------------------------------------------------------------
+- name: Run normal roles when rolling upgrade is disabled
   hosts: all
   gather_facts: true
   become: true
-  any_errors_fatal: true
-
-  roles:
-    - role: grafana_alloy
-      when: not postgres_minor_upgrade | default(false) | bool
-
-    - role: housekeep
-      when: not postgres_minor_upgrade | default(false) | bool
-
-    - role: postgresql
-      when: not postgres_minor_upgrade | default(false) | bool
-
-
-- name: Discover Patroni roles for minor upgrade
-  hosts: localhost
-  gather_facts: false
-  any_errors_fatal: true
-
-  vars:
-    # Current inventory has the DB hosts directly under all.hosts.
-    # Override this later with -e patroni_inventory_group=patroni_cluster if you add a named group.
-    patroni_inventory_group: all
-    patroni_api_scheme: http
-    patroni_api_port: 8008
-
-    # Environment-level switch. Looks for postgres_minor_upgrade=true on any host in the selected group.
-    postgres_minor_upgrade_enabled: >-
-      {{
-        groups[patroni_inventory_group]
-        | map('extract', hostvars, 'postgres_minor_upgrade')
-        | select('defined')
-        | map('bool')
-        | select('equalto', true)
-        | list
-        | length > 0
-      }}
 
   tasks:
-    - name: Show upgrade mode
-      ansible.builtin.debug:
-        msg:
-          postgres_minor_upgrade_enabled: "{{ postgres_minor_upgrade_enabled }}"
-          patroni_inventory_group: "{{ patroni_inventory_group }}"
-          selected_hosts: "{{ groups[patroni_inventory_group] | default([]) }}"
+    - name: Run normal PostgreSQL roles
+      ansible.builtin.import_role:
+        name: normal_postgres_roles
+      when: not (postgres_minor_upgrade_enabled | bool)
 
-    - name: Fail if selected Patroni inventory group is missing or empty
+
+# -------------------------------------------------------------------
+# Play 2 - Discovery runs on each Patroni node
+# -------------------------------------------------------------------
+- name: Discover Patroni role on each cluster member
+  hosts: all
+  gather_facts: true
+  become: false
+
+  tasks:
+    - name: Validate Patroni inventory group variable
       ansible.builtin.assert:
         that:
+          - patroni_inventory_group is defined
           - patroni_inventory_group in groups
           - groups[patroni_inventory_group] | length > 0
-        fail_msg: "Inventory group {{ patroni_inventory_group }} is missing or empty"
+        fail_msg: "Inventory group {{ patroni_inventory_group | default('undefined') }} is missing or empty"
       when: postgres_minor_upgrade_enabled | bool
 
-    - name: Query Patroni API on each cluster member
+    - name: End host if not in Patroni inventory group
+      ansible.builtin.meta: end_host
+      when:
+        - postgres_minor_upgrade_enabled | bool
+        - inventory_hostname not in groups[patroni_inventory_group]
+
+    - name: Set Patroni API discovery URL
+      ansible.builtin.set_fact:
+        patroni_api_url: >-
+          {{ patroni_api_scheme | default('http') }}://{{ patroni_api_host | default(ansible_default_ipv4.address) }}:{{ patroni_api_port | default(8008) }}/patroni
+      when: postgres_minor_upgrade_enabled | bool
+
+    - name: Query Patroni API locally from each node
       ansible.builtin.uri:
-        url: >-
-          {{ patroni_api_scheme }}://{{ hostvars[item].ansible_host | default(item) }}:{{ patroni_api_port }}/patroni
+        url: "{{ patroni_api_url }}"
         method: GET
         return_content: true
+        validate_certs: false
+        use_proxy: false
         status_code: 200
-      loop: "{{ groups[patroni_inventory_group] }}"
-      register: patroni_api_results
+        timeout: 10
+      register: patroni_api_result
       when: postgres_minor_upgrade_enabled | bool
 
-    - name: Show raw Patroni roles
-      ansible.builtin.debug:
-        msg: "{{ item.item }} returned Patroni role {{ item.json.role | default('unknown') }}"
-      loop: "{{ patroni_api_results.results | default([]) }}"
+    - name: Store Patroni discovery facts on each host
+      ansible.builtin.set_fact:
+        patroni_discovered: true
+        patroni_role: "{{ patroni_api_result.json.role | default('unknown') }}"
+        patroni_state: "{{ patroni_api_result.json.state | default('unknown') }}"
+        patroni_api_raw_json: "{{ patroni_api_result.json }}"
       when: postgres_minor_upgrade_enabled | bool
 
-    - name: Add replicas to rolling upgrade group
-      ansible.builtin.add_host:
-        name: "{{ item.item }}"
-        groups:
-          - patroni_replicas
-          - patroni_rolling_upgrade
-        patroni_role: "{{ item.json.role }}"
-      loop: "{{ patroni_api_results.results | default([]) }}"
-      when:
-        - postgres_minor_upgrade_enabled | bool
-        - item.json.role in ['replica', 'standby_leader']
-
-    - name: Add current leader to leader group
-      ansible.builtin.add_host:
-        name: "{{ item.item }}"
-        groups:
-          - patroni_leader
-        patroni_role: "{{ item.json.role }}"
-      loop: "{{ patroni_api_results.results | default([]) }}"
-      when:
-        - postgres_minor_upgrade_enabled | bool
-        - item.json.role in ['master', 'leader', 'primary']
-
-    - name: Validate exactly one Patroni leader was found
-      ansible.builtin.assert:
-        that:
-          - groups['patroni_leader'] | default([]) | length == 1
-        fail_msg: >-
-          Expected exactly one Patroni leader, found
-          {{ groups['patroni_leader'] | default([]) | length }}.
-          Patroni API results were: {{ patroni_api_results.results | default([]) | map(attribute='json') | list }}
-      when: postgres_minor_upgrade_enabled | bool
-
-    - name: Add current leader to rolling upgrade group last
-      ansible.builtin.add_host:
-        name: "{{ groups['patroni_leader'][0] }}"
-        groups:
-          - patroni_rolling_upgrade
-        patroni_role: leader
-      when: postgres_minor_upgrade_enabled | bool
-
-    - name: Show generated rolling upgrade order
+    - name: Show discovered Patroni role
       ansible.builtin.debug:
         msg:
-          replicas_first: "{{ groups['patroni_replicas'] | default([]) }}"
-          leader_last: "{{ groups['patroni_leader'] | default([]) }}"
-          rolling_order: "{{ groups['patroni_rolling_upgrade'] | default([]) }}"
+          host: "{{ inventory_hostname }}"
+          api_url: "{{ patroni_api_url }}"
+          role: "{{ patroni_role }}"
+          state: "{{ patroni_state }}"
       when: postgres_minor_upgrade_enabled | bool
 
 
-- name: Rolling PostgreSQL minor upgrade
+# -------------------------------------------------------------------
+# Play 3 - Build in-memory inventory from hostvars
+# -------------------------------------------------------------------
+- name: Build in-memory Patroni rolling upgrade inventory
+  hosts: all
+  gather_facts: false
+  become: false
+
+  tasks:
+    - name: Build inventory only once
+      run_once: true
+      when: postgres_minor_upgrade_enabled | bool
+      block:
+        - name: Show discovered Patroni hostvars
+          ansible.builtin.debug:
+            msg: >-
+              {{ item }} role={{ hostvars[item].patroni_role | default('missing') }}
+              state={{ hostvars[item].patroni_state | default('missing') }}
+              discovered={{ hostvars[item].patroni_discovered | default(false) }}
+          loop: "{{ groups[patroni_inventory_group] }}"
+
+        - name: Fail if any Patroni host was not discovered
+          ansible.builtin.assert:
+            that:
+              - hostvars[item].patroni_discovered | default(false) | bool
+              - hostvars[item].patroni_role | default('unknown') != 'unknown'
+            fail_msg: "Patroni discovery failed or returned unknown role for {{ item }}"
+          loop: "{{ groups[patroni_inventory_group] }}"
+
+        - name: Add replicas to rolling upgrade group
+          ansible.builtin.add_host:
+            name: "{{ item }}"
+            groups:
+              - patroni_replicas
+              - patroni_rolling_upgrade
+            patroni_role: "{{ hostvars[item].patroni_role }}"
+            patroni_state: "{{ hostvars[item].patroni_state }}"
+          loop: "{{ groups[patroni_inventory_group] }}"
+          when: hostvars[item].patroni_role in ['replica', 'standby_leader']
+
+        - name: Add current leader to leader group
+          ansible.builtin.add_host:
+            name: "{{ item }}"
+            groups:
+              - patroni_leader
+            patroni_role: "{{ hostvars[item].patroni_role }}"
+            patroni_state: "{{ hostvars[item].patroni_state }}"
+          loop: "{{ groups[patroni_inventory_group] }}"
+          when: hostvars[item].patroni_role in ['leader', 'primary', 'master']
+
+        - name: Add current leader last to rolling upgrade group
+          ansible.builtin.add_host:
+            name: "{{ item }}"
+            groups:
+              - patroni_rolling_upgrade
+            patroni_role: "{{ hostvars[item].patroni_role }}"
+            patroni_state: "{{ hostvars[item].patroni_state }}"
+          loop: "{{ groups[patroni_inventory_group] }}"
+          when: hostvars[item].patroni_role in ['leader', 'primary', 'master']
+
+        - name: Fail if rolling upgrade group is empty
+          ansible.builtin.assert:
+            that:
+              - groups['patroni_rolling_upgrade'] | default([]) | length > 0
+            fail_msg: "patroni_rolling_upgrade group is empty after discovery"
+
+        - name: Show final rolling upgrade order
+          ansible.builtin.debug:
+            msg: "{{ groups['patroni_rolling_upgrade'] | default([]) }}"
+
+
+# -------------------------------------------------------------------
+# Play 4 - Rolling upgrade using in-memory group
+# -------------------------------------------------------------------
+- name: Perform Patroni rolling upgrade
   hosts: patroni_rolling_upgrade
   gather_facts: true
   become: true
   serial: 1
-  any_errors_fatal: true
 
   tasks:
-    - name: Show host selected for upgrade
+    - name: Show host being upgraded
       ansible.builtin.debug:
-        msg: >-
-          Upgrading {{ inventory_hostname }}.
-          Original Patroni role was {{ patroni_role | default('unknown') }}.
+        msg:
+          host: "{{ inventory_hostname }}"
+          patroni_role: "{{ patroni_role | default('unknown') }}"
 
     - name: Run PostgreSQL minor upgrade role
-      ansible.builtin.include_role:
-        name: postgres_upgrade
+      ansible.builtin.import_role:
+        name: postgres_minor_upgrade
+      when: postgres_minor_upgrade_enabled | bool
