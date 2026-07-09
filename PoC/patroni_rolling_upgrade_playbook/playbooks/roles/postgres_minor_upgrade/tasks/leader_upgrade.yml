@@ -1,0 +1,56 @@
+---
+# Leader is processed last by the calling playbook (serial: 1), so every
+# replica should already be running the new minor version by the time we
+# get here. Switch leadership onto one of them first so the write path
+# never has to run on binaries we're about to replace, then upgrade this
+# node exactly as if it were a replica.
+
+- name: Get current cluster state before switchover
+  ansible.builtin.command:
+    cmd: "{{ patronictl_bin }} -c {{ patroni_config_file }} list {{ patroni_scope }} -f json"
+  register: patroni_cluster_before
+  changed_when: false
+
+- name: Identify a healthy replica candidate to receive leadership
+  ansible.builtin.set_fact:
+    patroni_switchover_candidate: >-
+      {{ (patroni_cluster_before.stdout | from_json
+          | selectattr('Role', 'in', ['Replica', 'Sync Standby'])
+          | selectattr('State', 'equalto', 'running')
+          | map(attribute='Member') | list | first) | default('', true) }}
+
+- name: Fail if no healthy replica is available to receive leadership
+  ansible.builtin.fail:
+    msg: "No healthy replica found to switch leadership to before upgrading {{ patroni_member_name }}"
+  when: patroni_switchover_candidate | length == 0
+
+- name: Switch leadership away from this node before upgrade
+  ansible.builtin.command:
+    cmd: >-
+      {{ patronictl_bin }} -c {{ patroni_config_file }} switchover {{ patroni_scope }}
+      --master {{ patroni_member_name }}
+      --candidate {{ patroni_switchover_candidate }}
+      --force
+  changed_when: true
+
+- name: Wait for this node to become a replica after switchover
+  ansible.builtin.command:
+    cmd: "{{ patronictl_bin }} -c {{ patroni_config_file }} list {{ patroni_scope }} -f json"
+  register: patroni_cluster_after_switchover
+  until: >-
+    (patroni_cluster_after_switchover.stdout | from_json
+      | selectattr('Member', 'equalto', patroni_member_name)
+      | map(attribute='Role') | list | first | default('')) in ['Replica', 'Sync Standby']
+  retries: "{{ postgres_upgrade_switchover_wait_retries }}"
+  delay: "{{ postgres_upgrade_switchover_wait_delay }}"
+  changed_when: false
+
+- name: Upgrade PostgreSQL package on former leader
+  ansible.builtin.include_tasks: upgrade_package.yml
+
+- name: Wait for former leader to rejoin cluster as healthy replica
+  ansible.builtin.include_tasks: wait_for_healthy.yml
+  vars:
+    expected_roles:
+      - Replica
+      - Sync Standby

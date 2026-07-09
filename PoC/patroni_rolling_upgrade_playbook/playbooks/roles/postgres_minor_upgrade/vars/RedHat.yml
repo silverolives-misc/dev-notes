@@ -1,0 +1,5 @@
+---
+# yum/dnf version pin format: pkgname-version
+postgres_minor_upgrade_package_spec: >-
+  {{ postgres_minor_upgrade_package_name ~
+     (('-' ~ postgres_minor_upgrade_package_version) if postgres_minor_upgrade_package_version else '') }}

@@ -1,0 +1,20 @@
+---
+# Stops Patroni (which stops the PostgreSQL it manages), upgrades the
+# package to the target minor version, then starts Patroni again so it
+# can reattach to the cluster on the new binaries.
+
+- name: Stop Patroni service on {{ patroni_member_name }}
+  ansible.builtin.systemd:
+    name: "{{ patroni_service_name }}"
+    state: stopped
+
+- name: Upgrade PostgreSQL package to target minor version
+  ansible.builtin.package:
+    name: "{{ postgres_minor_upgrade_package_spec }}"
+    state: "{{ 'present' if postgres_minor_upgrade_package_version else 'latest' }}"
+  register: postgres_package_upgrade_result
+
+- name: Start Patroni service on {{ patroni_member_name }}
+  ansible.builtin.systemd:
+    name: "{{ patroni_service_name }}"
+    state: started

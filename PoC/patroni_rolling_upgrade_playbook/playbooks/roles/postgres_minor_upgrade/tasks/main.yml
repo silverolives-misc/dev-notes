@@ -1,0 +1,20 @@
+---
+- name: Assert patroni_role hostvar was provided by the calling playbook
+  ansible.builtin.assert:
+    that:
+      - patroni_role is defined
+      - patroni_role in ['leader', 'primary', 'master', 'replica', 'standby_leader']
+    fail_msg: >-
+      patroni_role must be set to a known Patroni role by the discovery play
+      (got: {{ patroni_role | default('undefined') }})
+
+- name: Load OS-family specific package spec
+  ansible.builtin.include_vars: "{{ ansible_os_family }}.yml"
+
+- name: Run leader upgrade sequence (switchover, then upgrade)
+  ansible.builtin.include_tasks: leader_upgrade.yml
+  when: patroni_role in ['leader', 'primary', 'master']
+
+- name: Run replica upgrade sequence
+  ansible.builtin.include_tasks: replica_upgrade.yml
+  when: patroni_role in ['replica', 'standby_leader']

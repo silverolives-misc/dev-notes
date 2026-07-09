@@ -1,0 +1,38 @@
+---
+# Requires `expected_roles` (list of patronictl Role strings) to be set by
+# the caller.
+
+- name: Poll cluster state until this node is running with an expected role
+  ansible.builtin.command:
+    cmd: "{{ patronictl_bin }} -c {{ patroni_config_file }} list {{ patroni_scope }} -f json"
+  register: patroni_cluster_health
+  until: >-
+    (patroni_cluster_health.stdout | from_json
+      | selectattr('Member', 'equalto', patroni_member_name)
+      | map(attribute='State') | list | first | default('')) == 'running'
+    and
+    (patroni_cluster_health.stdout | from_json
+      | selectattr('Member', 'equalto', patroni_member_name)
+      | map(attribute='Role') | list | first | default('')) in expected_roles
+  retries: "{{ postgres_upgrade_health_check_retries }}"
+  delay: "{{ postgres_upgrade_health_check_delay }}"
+  changed_when: false
+
+- name: Capture final member state
+  ansible.builtin.set_fact:
+    patroni_member_final_state: >-
+      {{ patroni_cluster_health.stdout | from_json
+         | selectattr('Member', 'equalto', patroni_member_name) | list | first }}
+
+- name: Check replication lag is within acceptable bounds
+  ansible.builtin.assert:
+    that:
+      - (patroni_member_final_state['Lag in MB'] | float * 1024 * 1024) <= postgres_upgrade_max_lag_bytes
+    fail_msg: >-
+      {{ patroni_member_name }} rejoined but replication lag
+      ({{ patroni_member_final_state['Lag in MB'] }} MB) exceeds threshold
+  when: "'Lag in MB' in patroni_member_final_state"
+
+- name: Show final Patroni member state
+  ansible.builtin.debug:
+    var: patroni_member_final_state

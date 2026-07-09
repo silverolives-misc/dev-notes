@@ -1,0 +1,10 @@
+---
+- name: Upgrade PostgreSQL package on replica
+  ansible.builtin.include_tasks: upgrade_package.yml
+
+- name: Wait for replica to rejoin cluster as healthy
+  ansible.builtin.include_tasks: wait_for_healthy.yml
+  vars:
+    expected_roles:
+      - Replica
+      - Sync Standby

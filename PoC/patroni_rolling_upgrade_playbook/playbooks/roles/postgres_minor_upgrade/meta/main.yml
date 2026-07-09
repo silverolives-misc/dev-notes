@@ -1,0 +1,7 @@
+---
+galaxy_info:
+  role_name: postgres_minor_upgrade
+  description: Rolling PostgreSQL minor version upgrade for a Patroni cluster
+  min_ansible_version: "2.14"
+
+dependencies: []

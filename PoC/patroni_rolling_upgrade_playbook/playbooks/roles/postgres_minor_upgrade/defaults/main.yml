@@ -1,0 +1,36 @@
+---
+# postgres_minor_upgrade defaults
+#
+# Called once per host from the patroni_rolling_upgrade in-memory group.
+# Expects patroni_role (and patroni_state) as hostvars set by the calling
+# playbook's add_host tasks: leader/primary/master or replica/standby_leader.
+
+# -- Patroni service / CLI ------------------------------------------------
+patroni_service_name: patroni
+patronictl_bin: patronictl
+patroni_config_file: /etc/patroni/patroni.yml
+patroni_scope: postgres-cluster
+
+# Name Patroni knows this member by. Override in host_vars if it differs
+# from the Ansible inventory_hostname (e.g. short hostname vs FQDN).
+patroni_member_name: "{{ inventory_hostname }}"
+
+# -- Package to upgrade ----------------------------------------------------
+# postgres_minor_upgrade_package_version left blank installs the latest
+# available minor release from the enabled repo (state: latest). Pin it
+# to lock to an exact minor version instead (state: present).
+postgres_minor_upgrade_package_name: postgresql15
+postgres_minor_upgrade_package_version: ""
+
+# -- Health check tuning ----------------------------------------------------
+# How long to wait for a node to rejoin the cluster as a healthy
+# replica/standby after its Patroni service restarts with new binaries.
+postgres_upgrade_health_check_retries: 30
+postgres_upgrade_health_check_delay: 10
+
+# Maximum acceptable replication lag (bytes) once a node reports "running".
+postgres_upgrade_max_lag_bytes: 16777216
+
+# How long to wait for a switchover to complete before upgrading a leader.
+postgres_upgrade_switchover_wait_retries: 30
+postgres_upgrade_switchover_wait_delay: 5
