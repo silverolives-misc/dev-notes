@@ -1,0 +1,47 @@
+---
+ansible_python_interpreter: /usr/bin/python3
+_ansibleukenv:    'dev'
+
+dpe_aap_group:
+  name: 'ans_oracle'
+  gid:  '200054503'
+
+test123: 'Yes'
+
+dpe_aap_account:
+  name: 'ans_oracle'
+  uid:  '200054503'
+  shell: "/usr/bin/bash"
+  groups:
+    - 'wheel'
+  pw_expire_max:   7
+  pw_expire_min:  -1
+  pw_expire_warn: -1
+  pw_expires:     -1
+
+vault_helper:
+  package:      "_client_-hashi-vault-helper"
+  configd:      "/etc/vault-ssh-helper.d"
+  hcl_file_loc: "/etc/vault-ssh-helper.d/"
+  bin:          "/usr/local/bin/vault-ssh-helper"
+  namespace:
+    - "ITID/12410399_AAP"
+    - "ITID/243880_DPORAENG"
+
+otp_setup_ok: false
+
+dpe_legacy_ssh_user: 'oraansible'
+dpe_host_group: 'otp_test'
+
+action_list:
+  - 'check'
+  - 'verify'
+  - 'test'
+  - 'setup'
+
+authselect_otp_profile: 'exadata_otp'
+
+pam_files:
+  password_auth: "/etc/pam.d/password-auth"
+  system_auth:   "/etc/pam.d/system-auth"
+  sshd_file:     "/etc/pam.d/sshd"

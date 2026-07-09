@@ -1,0 +1,244 @@
+---
+- name: Validate Vault SSH OTP client configuration
+  vars:
+    sshd_config_file: /etc/ssh/sshd_config
+  block:
+
+    - name: get list of installed packages
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Is package {{ hostvars.localhost.vault_helper.package }} installed
+      ansible.builtin.set_fact:
+        helper_package_installed: "{{ hostvars.localhost.vault_helper.package in ansible_facts.packages }}"
+
+    - name: Check ansible user {{ hostvars.localhost.dpe_aap_account.name }} exists
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ hostvars.localhost.dpe_aap_account.name }}"
+      register: otp_user_check
+      ignore_errors: true
+
+    - name: Get group information from the host
+      ansible.builtin.getent:
+        database: group
+        key: "{{ item }}"
+      register: otp_group_check
+      ignore_errors: true
+      loop: "{{ [hostvars.localhost.dpe_aap_group.name] + ( hostvars.localhost.dpe_aap_account.groups | default([]) | list  ) | select }}"
+
+    - name: If user exists then check details
+      when: not otp_user_check.failed
+      block:
+
+        - name: Get users pgrp info
+          ansible.builtin.set_fact:
+            otp_user_pgrpid: "{{ otp_user_check.ansible_facts.getent_passwd[hostvars.localhost.dpe_aap_account.name][2] }}"
+
+        - name: Check {{ hostvars.localhost.dpe_aap_account.name }} group memberships
+          ansible.builtin.set_fact:
+            otp_group_status: '{{ ( otp_group_status | default([]) + [ add_item ] ) }}'
+          vars:
+            add_item:
+              group: "{{ item.item }}"
+              status: >-
+                {%- if item.failed -%}
+                missing
+                {%- elif (
+                    otp_user_pgrpid == item.ansible_facts.getent_group[item.item][1]
+                    or hostvars.localhost.dpe_aap_account.name in item.ansible_facts.getent_group[item.item][-1]
+                  ) -%}
+                true
+                {%- else -%}
+                false
+                {%- endif -%}
+          loop: "{{ otp_group_check.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Display group status for user {{ hostvars.localhost.dpe_aap_account.name }}
+          ansible.builtin.debug:
+            msg:
+              - "{{ hostvars.localhost.dpe_aap_account.name }} group status"
+              - "{{ otp_group_status }}"
+
+    - name: Check vault-ssh-helper binary
+      ansible.builtin.stat:
+        path: "{{ hostvars.localhost.vault_helper.bin }}"
+      register: helper_bin
+
+    - name: Check vault-ssh-helper config file
+      ansible.builtin.stat:
+        path: "{{ hostvars.localhost.vault_helper.hcl_file_loc }}/{{ item.split('/')[-1] | lower }}.hcl"
+      register: helper_cfg
+      loop: "{{ hostvars.localhost.vault_helper.namespace }}"
+
+    - name: Check PAM sshd file exists
+      ansible.builtin.stat:
+        path: "{{ hostvars.localhost.pam_files.sshd_file }}"
+      register: pam_sshd
+
+    - name: Check PAM password-auth file exists
+      ansible.builtin.stat:
+        path: "{{ hostvars.localhost.pam_files.password_auth }}"
+      register: pam_passwordauth
+
+    - name: Check PAM system-auth file exists
+      ansible.builtin.stat:
+        path: "{{ hostvars.localhost.pam_files.system_auth }}"
+      register: pam_systemauth
+
+    - name: Check sshd_config file exists
+      ansible.builtin.stat:
+        path: "{{ sshd_config_file }}"
+      register: sshd_cfg
+
+    - name: Read PAM sshd file
+      ansible.builtin.slurp:
+        path: "{{ hostvars.localhost.pam_files.sshd_file }}"
+      register: pam_sshd_content
+      when: pam_sshd.stat.exists
+
+    - name: Read PAM password-auth file
+      ansible.builtin.slurp:
+        path: "{{ hostvars.localhost.pam_files.password_auth }}"
+      register: pam_passwordauth_content
+      when: pam_passwordauth.stat.exists
+
+    - name: Read PAM system-auth file
+      ansible.builtin.slurp:
+        path: "{{ hostvars.localhost.pam_files.system_auth }}"
+      register: pam_systemauth_content
+      when: pam_systemauth.stat.exists
+
+    - name: Read sshd_config file
+      ansible.builtin.slurp:
+        path: "{{ sshd_config_file }}"
+      register: sshd_config_content
+      when: sshd_cfg.stat.exists
+
+    - name: Check PAM system-auth contains vault-ssh-helper
+      ansible.builtin.set_fact:
+        pam_systemauth_has_vault_helper: " {{ (pam_systemauth_content.content | b64decode) is search('vault-ssh-helper') }}"
+      when: pam_systemauth.stat.exists
+
+    - name: Check PAM password-auth contains vault-ssh-helper
+      ansible.builtin.set_fact:
+        pam_passwordauth_has_vault_helper: " {{ (pam_passwordauth_content.content | b64decode) is search('vault-ssh-helper') }}"
+      when: pam_passwordauth.stat.exists
+
+    - name: Check sshd_config enables UsePAM
+      ansible.builtin.set_fact:
+        sshd_usepam_ok: " {{ (sshd_config_content.content | b64decode) is search('(?im)^UsePAM\\s+yes\\s*$') }}"
+      when: sshd_cfg.stat.exists
+
+    - name: Check sshd_config enables PasswordAuthentication
+      ansible.builtin.set_fact:
+        sshd_passwordauth_ok: "{{ sshd_config_content.content | b64decode is regex('(?m)^\\s*PasswordAuthentication\\s+yes\\s*$') }}"
+      when: sshd_cfg.stat.exists
+
+    - name: Check vault address reachable
+      ansible.builtin.uri:
+        url: "{{ hostvars.localhost._client__hashi_url }}/v1/sys/health"
+        method: GET
+        validate_certs: true
+        return_content: false
+        status_code: [200, 429, 472, 473, 501, 503]
+      register: vault_health
+      changed_when: false
+      failed_when: false
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Determine ssh service name
+      ansible.builtin.set_fact:
+        ssh_service_name: >-
+          {{
+            'sshd.service' if 'sshd.service' in ansible_facts.services
+            else 'ssh.service' if 'ssh.service' in ansible_facts.services
+            else ''
+          }}
+
+    - name: Build validation summary
+      ansible.builtin.set_fact:
+        otp_validation:
+          user_exists: "{{ not otp_user_check.failed }}"
+          group_membership: >-
+            {{
+                ( otp_group_status | default([]) | length > 0 )
+                and
+                (
+                  otp_group_status
+                  | default([])
+                  | map(attribute='status')
+                  | select('equalto', 'true')
+                  | list
+                  | length
+                  ==
+                  otp_group_status
+                  | default([])
+                  | length
+                )
+            }}
+          helper_package_installed: "{{ helper_package_installed | default(false) }}"
+          helper_binary_exists: "{{ helper_bin.stat.exists | default(false) }}"
+          helper_config_exists: >-
+            {{ helper_cfg.results
+                | community.general.json_query("length(@) > `0` && !contains([].stat.exists, `false`)")
+                | default(false)
+            }}
+          pam_sshd_exists: "{{ pam_sshd.stat.exists | default(false) }}"
+          pam_systemauth_has_vault_helper: "{{ pam_systemauth_has_vault_helper | default(false) }}"
+          pam_passwordauth_has_vault_helper: "{{ pam_passwordauth_has_vault_helper | default(false) }}"
+          sshd_config_exists: "{{ sshd_cfg.stat.exists | default(false) }}"
+          sshd_usepam_ok: "{{ sshd_usepam_ok | default(false) }}"
+          sshd_passwordauth_ok: "{{ sshd_passwordauth_ok | default(false) }}"
+          vault_reachable: "{{ vault_health.status is defined }}"
+          ssh_service_found: "{{ ssh_service_name != '' }}"
+          ssh_service_running: >-
+            {{
+              ssh_service_name != '' and
+              ansible_facts.services[ssh_service_name].state == 'running'
+            }}
+          ssh_service_enabled: >-
+            {{
+              ssh_service_name != '' and
+              ansible_facts.services[ssh_service_name].status == 'enabled'
+            }}
+
+    - name: Show validation summary
+      ansible.builtin.debug:
+        var: otp_validation
+
+    - name: Fail if OTP client is not set up correctly
+      ansible.builtin.assert:
+        that:
+          - otp_validation.user_exists
+          - otp_validation.group_membership
+          - otp_validation.helper_package_installed
+          - otp_validation.helper_binary_exists
+          - otp_validation.helper_config_exists
+          - otp_validation.pam_sshd_exists
+          - otp_validation.pam_passwordauth_has_vault_helper
+          - otp_validation.pam_systemauth_has_vault_helper
+          - otp_validation.sshd_config_exists
+          - otp_validation.sshd_usepam_ok
+          - otp_validation.sshd_passwordauth_ok
+          - otp_validation.vault_reachable
+          - otp_validation.ssh_service_found
+          - otp_validation.ssh_service_running
+        fail_msg: "Vault SSH OTP client setup is incomplete on this host."
+        success_msg: "Vault SSH OTP client setup looks correct on this host."
+
+    - name: Set set-up ok to true
+      ansible.builtin.set_fact:
+        otp_setup_ok: true
+        otp_reachable: true
+
+  rescue:
+
+    - name: Set flag to fail
+      ansible.builtin.set_fact:
+        otp_setup_ok: false
+        otp_reachable: false

@@ -1,0 +1,6 @@
+---
+# Contains environment specific details relating to HashiVault
+# We can only have one _CLIENT_ hashi vault approle allocated to a template, we need 2 roles defined
+# to allowd the vm client to authenticate against
+
+_client__hashi_url: 'https://vault-dev.uk._client_:8200/v1'

@@ -1,0 +1,11 @@
+---
+- name: Ensure critical variables are set
+  ansible.builtin.assert:
+    that:
+      - _action is defined
+      - _action in action_list | default('[]')
+      - target_hosts is defined
+      - target_hosts is sequence
+      - target_hosts | length > 0
+      - _ansibleukenv is defined
+      - _ansibleukenv | lower in [ 'dev', 'uat', 'prod' ]

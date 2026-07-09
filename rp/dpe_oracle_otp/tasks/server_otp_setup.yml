@@ -1,0 +1,137 @@
+---
+- name: Create group for landing account {{ hostvars.localhost.dpe_aap_account.name }}
+  ansible.builtin.group:
+    name:  "{{ hostvars.localhost.dpe_aap_group.name }}"
+    gid:   "{{ hostvars.localhost.dpe_aap_group.gid }}"
+    state: present
+
+- name: Create landing account {{ hostvars.localhost.dpe_aap_account.name }}
+  ansible.builtin.user:
+    comment: "Oracle DPE ExaCC AAP Landing Account"
+    append:  true
+    group:   "{{ hostvars.localhost.dpe_aap_group.name }}"
+    groups:  "{{ hostvars.localhost.dpe_aap_account.groups }}"
+    uid:     "{{ hostvars.localhost.dpe_aap_account.uid }}"
+    home:    "/home/{{ hostvars.localhost.dpe_aap_account.name }}"
+    name:    "{{ hostvars.localhost.dpe_aap_account.name }}"
+    shell:   "{{ hostvars.localhost.dpe_aap_account.shell }}"
+    state:   present
+    password_expire_min:  "{{ hostvars.localhost.dpe_aap_account.pw_expire_min }}"
+    password_expire_max:  "{{ hostvars.localhost.dpe_aap_account.pw_expire_max }}"
+    password_expire_warn: "{{ hostvars.localhost.dpe_aap_account.pw_expire_warn if ansible_version.full is ansible.builtin.version('2.16', '>=') else omit }}"
+    expires:               "{{ hostvars.localhost.dpe_aap_account.pw_expires }}"
+
+- name: Install package {{ hostvars.localhost.vault_helper.package }}
+  ansible.builtin.package:
+    name: "{{ hostvars.localhost.vault_helper.package }}"
+    state: latest
+    update_cache: yes
+  register: install_helper_package_output
+  retries: 5
+  delay: 30
+  until: install_helper_package_output is succeeded
+
+- name: Ensure the helper config directory exists
+  ansible.builtin.stat:
+    path: "{{ hostvars.localhost.vault_helper.configd }}"
+  register: vault_helper_configd_stat
+
+# /etc/helper-config.d should be present after package install
+# fail if not present, we cannot create as it contains pem file to
+# connect to hashi
+- name: Fail if the directory does not exist
+  ansible.builtin.fail:
+    msg: "The ssh helper dir {{ hostvars.localhost.vault_helper.configd }} must exist"
+  when: not vault_helper_configd_stat.stat.isdir
+
+- name: Copy template helper config
+  ansible.builtin.template:
+    src:  "vault-helper.hcl.j2"
+    dest: "{{ hostvars.localhost.vault_helper.configd }}/{{ item.split('/')[-1] }}.hcl"
+    owner: root
+    group: root
+    mode:  "0644"
+  loop: "{{ hostvars.localhost.vault_helper.namespace }}"
+
+- name: Get list of current authselect profiles
+  ansible.builtin.command: /usr/bin/authselect list
+  register: authselect_profile_list
+  changed_when: false
+
+- name: Pick base profile
+  ansible.builtin.set_fact:
+    authselect_base_profile: >-
+      {{
+        'sssd' if not ( 'custom/exadata' in authselect_profile_list.stdout ) else 'custom/exadata'
+      }}
+
+- name: Pick base profile
+  ansible.builtin.set_fact:
+    authselect_otp_profile_exists: >-
+      {{
+        ( 'custom/' ~ hostvars.localhost.authselect_otp_profile in authselect_profile_list.stdout )
+      }}
+
+- debug: var=authselect_otp_profile_exists
+
+- name: Create new authselect profile based on the exadata profile
+  ansible.builtin.command: /usr/bin/authselect create-profile "{{ hostvars.localhost.authselect_otp_profile }}" -b "{{ authselect_base_profile }}" --symlink-meta
+  when: not authselect_otp_profile_exists
+
+- name: Copy auth files to profile {{ hostvars.localhost.authselect_otp_profile }}
+  ansible.builtin.template:
+    src:  "{{ item }}.j2"
+    dest: "/etc/authselect/custom/{{ hostvars.localhost.authselect_otp_profile }}/{{ item }}"
+    owner: root
+    group: root
+    mode:  "0644"
+  loop:
+    - password-auth
+    - system-auth
+    - postlogin
+
+- name: activate {{ hostvars.localhost.authselect_otp_profile }}
+  ansible.builtin.command: /usr/bin/authselect select custom/{{ hostvars.localhost.authselect_otp_profile }} --force
+
+- name: Check if sshd dropin exists
+  ansible.builtin.stat:
+    path: /etc/ssh/sshd_config.d
+  register: sshd_dropin_stat
+
+- name: Find PasswordAuthentication in sshd_config.d
+  ansible.builtin.find:
+    paths: /etc/ssh/sshd_config.d
+    pattern: '*.conf'
+    contains: '^#?\s*PasswordAuthentication\s+'
+  when: sshd_dropin_stat.stat.isdir | default(false)
+  register: dropin_matches
+
+- name: Uodate PasswordAuthentication in any drop-in files
+  ansible.builtin.lineinfile:
+    path: "{{ item.path }}"
+    regexp: '^#?\s*PasswordAuthentication\s+'
+    line:   'PasswordAuthentication yes'
+    state: present
+    backup: yes
+  loop: "{{ dropin_matches.files }}"
+  when: dropin_matches.files is defined
+
+- name: Ensure PasswordAuthentication is set in sshd_config
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?\s*PasswordAuthentication\s+'
+    line:   'PasswordAuthentication yes'
+    state: present
+    backup: yes
+
+- name: Verify sshd config
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+
+- name: reload sshd
+  ansible.builtin.service:
+    name:  sshd
+    state: reloaded
+
+- name: apply authselect changes
+  ansible.builtin.command: /usr/bin/authselect apply-changes

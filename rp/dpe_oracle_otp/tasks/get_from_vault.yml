@@ -1,0 +1,38 @@
+---
+- name: "Get required Credentials from Hashi vault"
+  block:
+    - name: "Retreive secrets using hashi_vault lookup"
+      ansible.builtin.set_fact:
+        response: "{{ lookup('community.hashi_vault.vault_kv2_get',
+            'aap_' ~ _ansible_region|lower ~ '_oracle/build_credentials',
+            engine_mount_point='secrets/kv_v2',
+            namespace=lookup('env', '_CLIENT__HASHI_NAMESPACE'),
+            role_id=lookup('env', '_CLIENT__HASHI_ROLE'),
+            token=hostvars['localhost']['login_token'],
+            url=lookup('env', '_CLIENT__HASHI_URL') | regex_replace('^(.*)/v1$', '\\1')) }}"
+      no_log: true
+
+    - name: "Store credentials"
+      ansible.builtin.set_fact:
+        build_cred: "{{ response.secret }}"
+      no_log: true
+
+  rescue:
+    - name: "Failure in {{ ansible_failed_task.name }}"
+      ansible.builtin.fail:
+        msg: "{{ ansible_failed_result.json.errors }} - {{ ansible_failed_result.msg }}"
+      when: ansible_failed_result.json is defined
+
+    - name: "Failure in {{ ansible_failed_task.name }}"
+      ansible.builtin.fail:
+        msg: "{{ ansible_failed_result }}"
+      when: ansible_failed_result.json is not defined
+
+- name: Set credentials fact
+  ansible.builtin.set_fact:
+    dp_svc_api_user: "{{ build_cred.dp_svc_api_user }}"
+    dp_svc_api_password: "{{ build_cred.dp_svc_api_password }}"
+    fw_resources_user: "{{ build_cred.dp_svc_api_user }}"
+    fw_resources_password: "{{ build_cred.dp_svc_api_password }}"
+  no_log: true
+...

@@ -1,0 +1,88 @@
+---
+- name: Test OTP with ExaCC
+  block:
+
+    # Set facts for Hashi Vault
+    - name: Grab Hashi vault details from AAP-Controller and create set facts
+      ansible.builtin.set_fact:
+        _client__hashi_url: "{{ lookup('env', '_CLIENT__HASHI_URL') | regex_replace('^(.*)/v1$', '\\1') }}"
+        _client__hashi_namespace: "{{ lookup('env', '_CLIENT__HASHI_NAMESPACE') }}"
+        _client__hashi_role: "{{ lookup('env', '_CLIENT__HASHI_ROLE') }}"
+
+    - name: Grab A Login Token
+      ansible.builtin.set_fact:
+        login_token: "{{ lookup('_client_.epe.hashi_vault_login_token', token_ttl='6h') }}"
+      no_log: true
+
+    - name: Do a sample shell command on the remote host to prove ans_oracle connectivity
+      ansible.builtin.command: id
+      register: command_output_ans_oracle
+      remote_user: ans_oracle
+      ignore_unreachable: true
+      vars:
+        ansible_ssh_pass: "{{ lookup('_client_.epe.ssh_otp',
+          inventory_hostname,
+          login_token=login_token,
+          ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
+          account='ans_oracle')}}"
+
+    - name: Display the command command_output
+      debug:
+        msg:
+          - "{{ command_output_ans_oracle.stdout_lines }}"
+      when: command_output_ans_oracle.unreachable is not defined
+
+    - name: Do a sample shell command on the remote host to prove elevated connectivity
+      ansible.builtin.command: id
+      register: command_output_elevated
+      remote_user: ans_oracle
+      become: true
+      become_user: root
+      become_method: ansible.builtin.su
+      when: command_output_ans_oracle.unreachable is not defined
+      vars:
+        ansible_ssh_pass: "{{ lookup('_client_.epe.ssh_otp',
+          inventory_hostname,
+          login_token=login_token,
+          ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
+          account='ans_oracle')}}"
+        ansible_become_pass: "{{ lookup('_client_.epe.ssh_otp',
+          inventory_hostname,
+          login_token=login_token,
+          ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
+          account='root')}}"
+
+    - name: Display the command command_output
+      debug:
+        msg:
+          - "{{ command_output_elevated.stdout_lines }}"
+      when: command_output_elevated.stdout_lines is defined
+
+    - name: clear errors When first_attempt and {{ inventory_hostname }} is unreachable
+      ansible.builtin.meta: clear_host_errors
+      when:
+        - first_attempt | default(false)
+        - command_output_ans_oracle.unreachable is defined or command_output_elevated.unreachable is defined
+
+    - name: Fail if first_attempt and {{ inventory_hostname }} unreachable
+      ansible.builtin.fail:
+        msg: "OTP failed Pre OTP set-up this is to be expected"
+      when:
+        - first_attempt is defined and first_attempt
+        - command_output_ans_oracle.unreachable is defined or command_output_elevated.unreachable is defined
+
+    - name: Fail if not first_attempt and {{ inventory_hostname }} unreachable
+      ansible.builtin.fail:
+        msg: "OTP tests have failed"
+      when:
+        - not first_attempt | default(false)
+        - command_output_ans_oracle.unreachable is defined or command_output_elevated.unreachable is defined
+
+  rescue:
+    - name: Task failed with otp
+      debug:
+        msg: "Using OTP on {{ inventory_hostname }} failed"
+
+    - name: Flag error
+      ansible.builtin.set_fact:
+        otp_error: true

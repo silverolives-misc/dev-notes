@@ -1,0 +1,94 @@
+---
+- name: "PLAY 1 - Build in-memory inventory"
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+
+    - name: include vars from file
+      ansible.builtin.include_vars:
+        file: vars/dpe_otp.yml
+
+    - name: include environmental variables
+      ansible.builtin.include_vars:
+        file: "vars/{{ _ansibleukenv | default('dev') | lower }}.yml"
+
+    - name: Validate environment
+      ansible.builtin.include_tasks:
+        file: tasks/validate.yml
+
+    - name: Add every target host to the in-memory inventory
+      ansible.builtin.add_host:
+        hostname: "{{ item }}"
+        groups: "{{ dpe_host_group }}"
+      loop: "{{ target_hosts }}"
+      changed_when: false
+
+- name: "PLAY 2 - Check OTP set-up status (parallel)"
+  hosts: "{{ hostvars.localhost.dpe_host_group }}"
+  gather_facts: yes
+  remote_user: "{{ hostvars.localhost.dpe_legacy_ssh_user }}"
+  become: true
+  become_method: ansible.builtin.sudo
+  strategy: linear
+
+  tasks:
+
+    - name: Check OTP client set-up status for {{ inventory_hostname }}
+      ansible.builtin.include_tasks:
+        file: tasks/client_check.yml
+      when: hostvars.localhost._action in [ 'setup', 'check' ]
+      tags: [ 'check' ]
+
+- name: "PLAY 3 - Set-up hosts for OTP and verify post-setup"
+  hosts: "{{ hostvars.localhost.dpe_host_group }}"
+  gather_facts: no
+  remote_user: "{{ hostvars.localhost.dpe_legacy_ssh_user }}"
+  become: true
+  become_method: ansible.builtin.sudo
+  strategy: linear
+  serial:
+    - 1
+    - "10%"
+    - "25%"
+    - "100%"
+  max_fail_percentage: 0
+
+  tasks:
+
+    - name: Set-up {{ inventory_hostname }} for OTP
+      ansible.builtin.include_tasks:
+        file: tasks/server_otp_setup.yml
+      when:
+        - hostvars.localhost._action == 'setup'
+        - not (otp_setup_ok | default(false))
+
+    - name: Post-setup OTP verify for {{ inventory_hostname }}
+      ansible.builtin.include_tasks:
+        file: tasks/check_otp_connection.yml
+      when: hostvars.localhost._action in [ 'setup', 'test', 'verify' ]
+
+    - name: Record post-verify OTP status for {{ inventory_hostname }}
+      ansible.builtin.set_fact:
+        otp_setup_ok: "{{ not (otp_error | default(false)) }}"
+      when: hostvars.localhost._action in [ 'setup', 'test', 'verify' ]
+
+- name: "PLAY 4 - Report OTP status"
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+
+    - name: Report OTP validation summary per host
+      ansible.builtin.set_stats:
+        data:
+          otp_report: >-
+            {{ (otp_report | default({})) | combine({ item: {
+                  'otp_setup_ok': hostvars[item].otp_setup_ok | default(false),
+                  'otp_reachable': hostvars[item].otp_reachable | default(false),
+                  'otp_validation': hostvars[item].otp_validation | default({}),
+                  'ansible_distribution': hostvars[item].ansible_distribution | default('unknown'),
+                  'ansible_distribution_version': hostvars[item].ansible_distribution_version | default('unknown'),
+                } }) }}
+        aggregate: true
+      loop: "{{ groups[dpe_host_group] | default([]) }}"
