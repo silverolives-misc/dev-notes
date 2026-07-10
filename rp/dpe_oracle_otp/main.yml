@@ -44,8 +44,6 @@
   hosts: "{{ hostvars.localhost.dpe_host_group }}"
   gather_facts: no
   remote_user: "{{ hostvars.localhost.dpe_legacy_ssh_user }}"
-  become: true
-  become_method: ansible.builtin.sudo
   strategy: linear
   serial:
     - 1
@@ -56,12 +54,24 @@
 
   tasks:
 
+    # become is scoped to this block only - server_otp_setup.yml needs root
+    # via the legacy user's sudo. check_otp_connection.yml manages its own
+    # become per-task (none for the ans_oracle check, become+su for the
+    # root check), so it must NOT inherit become from the play - that was
+    # causing "Missing sudo password" on the ans_oracle-only step.
+    # Note: become/become_method aren't valid directly on an include_tasks
+    # task in this ansible-core version - they only propagate into the
+    # included tasks when set on a wrapping block.
     - name: Set-up {{ inventory_hostname }} for OTP
-      ansible.builtin.include_tasks:
-        file: tasks/server_otp_setup.yml
+      become: true
+      become_method: ansible.builtin.sudo
       when:
         - hostvars.localhost._action == 'setup'
         - not (otp_setup_ok | default(false))
+      block:
+        - name: Run server OTP setup tasks
+          ansible.builtin.include_tasks:
+            file: tasks/server_otp_setup.yml
 
     - name: Post-setup OTP verify for {{ inventory_hostname }}
       ansible.builtin.include_tasks:
