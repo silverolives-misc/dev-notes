@@ -64,7 +64,7 @@
 # ------------------------------------------------------------------------------
 # Write the new password back to the custom static database secrets engine.
 # POST /v1/<mount>/role/<role_name> with username + password body.
-# The engine records the write timestamp in last_vault_rotation.
+# The engine increments current_version and updates created_at on each write.
 # ------------------------------------------------------------------------------
 
 - name: "Rotate | Write new password to Vault custom static engine"

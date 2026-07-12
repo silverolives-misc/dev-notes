@@ -7,8 +7,8 @@
 # current_sys_password and secret_age_days are supplied as hostvars by the
 # playbook (sourced from the role metadata GET in Phase 1).
 #
-# The pre-rotation GET captures last_vault_rotation so post_validate.yml can
-# confirm the timestamp advanced after the password write-back.
+# The pre-rotation GET captures created_at and current_version so
+# post_validate.yml can confirm current_version incremented after write-back.
 # ------------------------------------------------------------------------------
 
 - name: "Vault Pre-check | Assert credential hostvars were supplied by playbook"
@@ -56,25 +56,26 @@
     that:
       - vault_role_meta.status == 200
       - vault_role_meta.json.data is defined
-      - vault_role_meta.json.data.connection_url is defined
       - vault_role_meta.json.data.username is defined
+      - vault_role_meta.json.data.created_at is defined
+      - vault_role_meta.json.data.current_version is defined
     fail_msg: >
       Cannot read role '{{ vault_role_name }}' from
       '{{ vault_engine_mount }}/role/{{ vault_role_name }}'.
       Check the engine mount and token permissions.
     success_msg: "Vault role '{{ vault_role_name }}' is reachable and valid."
 
-- name: "Vault Pre-check | Capture pre-rotation last_vault_rotation timestamp"
+- name: "Vault Pre-check | Capture pre-rotation version and timestamp"
   ansible.builtin.set_fact:
-    vault_pre_rotation_timestamp: >-
-      {{ vault_role_meta.json.data.last_vault_rotation | default('') }}
+    vault_pre_rotation_timestamp: "{{ vault_role_meta.json.data.created_at }}"
+    vault_pre_rotation_version:   "{{ vault_role_meta.json.data.current_version | int }}"
 
 - name: "Vault Pre-check | Display rotation context"
   ansible.builtin.debug:
     msg:
       - "Vault role         : {{ vault_role_name }}"
       - "Oracle user        : {{ vault_role_meta.json.data.username }}"
-      - "ExaCC hosts        : {{ vault_role_meta.json.data.connection_url }}"
-      - "Last rotated       : {{ last_vault_rotation | default('unknown') }}"
+      - "Current version    : {{ vault_role_meta.json.data.current_version }}"
+      - "Last rotated       : {{ vault_role_meta.json.data.created_at }}"
       - "Secret age         : {{ secret_age_days }} days"
       - "Rotation threshold : {{ password_max_age_days }} days"

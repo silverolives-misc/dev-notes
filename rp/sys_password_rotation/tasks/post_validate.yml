@@ -62,8 +62,8 @@
 
 # ------------------------------------------------------------------------------
 # Read the role back from the custom static engine and confirm that
-# last_vault_rotation has advanced beyond the timestamp captured in
-# precheck_vault.yml (vault_pre_rotation_timestamp).
+# current_version has incremented beyond vault_pre_rotation_version captured
+# in precheck_vault.yml, confirming the password write was accepted.
 # ------------------------------------------------------------------------------
 
 - name: "Post-validate | GET role from Vault custom static engine"
@@ -79,21 +79,21 @@
   register: vault_post_role
   no_log: true
 
-- name: "Post-validate | Assert Vault role reflects the rotation"
+- name: "Post-validate | Assert Vault version incremented after rotation"
   ansible.builtin.assert:
     that:
       - vault_post_role.status == 200
-      - vault_post_role.json.data.last_vault_rotation is defined
-      - vault_post_role.json.data.last_vault_rotation != vault_pre_rotation_timestamp | default('')
+      - vault_post_role.json.data.current_version is defined
+      - vault_post_role.json.data.current_version | int > vault_pre_rotation_version | int
     fail_msg: >
-      Vault last_vault_rotation has not changed after rotation.
-      Pre-rotation value: {{ vault_pre_rotation_timestamp | default('unknown') }}.
-      Current value: {{ vault_post_role.json.data.last_vault_rotation | default('absent') }}.
-      The password may not have been written successfully.
+      Vault current_version did not increment after rotation.
+      Pre-rotation: {{ vault_pre_rotation_version }},
+      post-rotation: {{ vault_post_role.json.data.current_version | default('absent') }}.
+      The password may not have been written to the engine successfully.
     success_msg: >
-      Vault rotation confirmed: last_vault_rotation updated from
-      '{{ vault_pre_rotation_timestamp | default('(none)') }}'
-      to '{{ vault_post_role.json.data.last_vault_rotation }}'.
+      Vault rotation confirmed: version incremented from
+      {{ vault_pre_rotation_version }} to
+      {{ vault_post_role.json.data.current_version }}.
 
 - name: "Post-validate | Remove break-glass backup after confirmed success"
   ansible.builtin.file:
@@ -121,7 +121,8 @@
       - "CV Detected     : {{ commvault_detected | default(false) }}"
       - "Vault Role      : {{ vault_role_name }}"
       - "Vault Engine    : {{ vault_engine_url }}/v1/{{ vault_engine_mount }}"
-      - "Last Rotated    : {{ vault_post_role.json.data.last_vault_rotation | default(ansible_date_time.iso8601) }}"
+      - "Vault Version   : {{ vault_pre_rotation_version }} → {{ vault_post_role.json.data.current_version }}"
+      - "Rotated At      : {{ vault_post_role.json.data.created_at | default(ansible_date_time.iso8601) }}"
       - "Rotated At      : {{ ansible_date_time.iso8601 }}"
       - "Rotated By      : {{ ansible_user_id }}"
       - "============================================="
