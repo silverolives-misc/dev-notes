@@ -29,7 +29,7 @@
   no_log: true
   vars:
     ansible_become_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
-        login_token=login_token,
+        login_token=hostvars[inventory_hostname]['login_token'],
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
         account='oracle') }}"
 
@@ -83,7 +83,7 @@
   no_log: true
   vars:
     ansible_become_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
-        login_token=login_token,
+        login_token=hostvars[inventory_hostname]['login_token'],
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
         account='oracle') }}"
 
