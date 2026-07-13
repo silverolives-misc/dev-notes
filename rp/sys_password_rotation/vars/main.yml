@@ -14,11 +14,13 @@ sqlplus_preamble: |
   SET ECHO         OFF
   SET TRIMSPOOL    ON
   SET LINESIZE     4000
+  SET DEFINE       OFF
   SET COLSEP       '|'
   SET NULL         'NULL'
 
 # Oracle environment — source the per-database env file present on ExaCC hosts
 oracle_env: ". /home/oracle/{{ db_unique_name_actual }}.env"
 
-# sqlplus connect string — local bequeath via ORACLE_SID (set by env file, no listener needed)
-sqlplus_connect: "sys/\"{{ current_sys_password }}\" as sysdba"
+# sqlplus connect string — OS authentication via ORACLE_SID set by env file
+# No password required; oracle OS user in dba group grants sysdba access locally
+sqlplus_connect: "/ as sysdba"

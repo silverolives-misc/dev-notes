@@ -110,11 +110,47 @@
   when: item[1] != 'MOUNTED'
 
 # ==============================================================================
-# Section 5 — SYS account status (sqlplus — only remaining query in this file)
+# Section 5 — SYS credential validation + account status
 #
-# dba_users is not surfaced by dbaascli. This query also implicitly validates
-# that sqlplus can connect with the current SYS credential and correct SCAN/port.
+# Credential check: connects as sys/"$SQLPLUS_CONN" (password via env var to
+# avoid Jinja2/heredoc rendering issues). Fails fast if Vault is out of sync
+# with Oracle before any rotation is attempted.
+#
+# Account status: uses OS auth (/ as sysdba) — dba_users not in dbaascli.
 # ==============================================================================
+
+- name: "Oracle Pre-check | Validate current SYS credential from Vault"
+  ansible.builtin.shell: |
+    {{ oracle_env }}
+    sqlplus -s /nolog <<EOF
+    {{ sqlplus_preamble }}
+    CONNECT sys/"$SQLPLUS_CONN" as sysdba
+    SELECT 'CREDENTIAL_OK' FROM dual;
+    EXIT;
+    EOF
+  environment:
+    SQLPLUS_CONN: "{{ current_sys_password }}"
+  register: _cred_check_raw
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  changed_when: false
+  no_log: true
+  vars:
+    ansible_become_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
+        login_token=hostvars[inventory_hostname]['login_token'],
+        ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
+        account='oracle') }}"
+
+- name: "Oracle Pre-check | Assert Vault SYS credential matches Oracle"
+  ansible.builtin.assert:
+    that:
+      - _cred_check_raw.rc == 0
+      - "'CREDENTIAL_OK' in _cred_check_raw.stdout"
+    fail_msg: >
+      Current SYS password from Vault does not authenticate against Oracle.
+      Vault and Oracle are out of sync — resync manually before rotating.
+    success_msg: "Vault SYS credential validated successfully against Oracle."
 
 - name: "Oracle Pre-check | Query SYS account status via sqlplus"
   ansible.builtin.shell: |
@@ -142,15 +178,14 @@
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
         account='oracle') }}"
 
-- name: "Oracle Pre-check | Assert sqlplus connected and returned SYS data"
+- name: "Oracle Pre-check | Assert sqlplus returned SYS data"
   ansible.builtin.assert:
     that:
       - sys_account_raw.rc == 0
       - sys_account_raw.stdout_lines | select('match', '^[A-Z]') | list | length > 0
     fail_msg: >
-      sqlplus failed to connect or returned no SYS data (RC={{ sys_account_raw.rc }}).
-      SCAN={{ scan_address }}, Port={{ oracle_port }}, Service={{ oracle_service }}.
-    success_msg: "sqlplus connected successfully with current SYS credential."
+      sqlplus failed to return SYS account data (RC={{ sys_account_raw.rc }}).
+    success_msg: "SYS account data retrieved successfully."
 
 - name: "Oracle Pre-check | Parse SYS account facts"
   ansible.builtin.set_fact:
