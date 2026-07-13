@@ -4,7 +4,7 @@
 # Assert Oracle DB health using facts set by detect_topology.yml.
 #
 # All RAC instance status, DB role, open mode, PDB status and Oracle version
-# facts are now sourced from dbaascli config getDatabases (detect_topology.yml).
+# facts are now sourced from dbaascli database getDetails (detect_topology.yml).
 # The only remaining sqlplus query here is for SYS account status (dba_users)
 # which is not exposed by dbaascli. That query also serves as the implicit
 # live connectivity test for the SYS credential.

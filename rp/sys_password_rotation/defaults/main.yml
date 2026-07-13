@@ -38,7 +38,7 @@ min_rollover_time_days: "{{ 1 / 24 }}"
 
 # ------------------------------------------------------------------------------
 # Oracle connection — scan_address, oracle_port, oracle_service and oracle_home
-# are set dynamically by detect_topology.yml from dbaascli config getDatabases.
+# are set dynamically by detect_topology.yml from dbaascli database getDetails.
 # The values here are fallback defaults only.
 # ------------------------------------------------------------------------------
 oracle_port:    1521

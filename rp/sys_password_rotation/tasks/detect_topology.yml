@@ -1,7 +1,7 @@
 ---
 # ------------------------------------------------------------------------------
 # detect_topology.yml
-# Runs dbaascli config getDatabases once to derive the full topology.
+# Runs dbaascli database getDetails once to derive the full topology.
 #
 # Replaces all sqlplus-based topology detection:
 #   - v$dataguard_config / v$parameter / v$standby_log  → dgEnabled field
@@ -27,12 +27,12 @@
 # ------------------------------------------------------------------------------
 
 # ==============================================================================
-# Section 1 — dbaascli config getDatabases
+# Section 1 — dbaascli database getDetails
 # ==============================================================================
 
-- name: "Topology | Run dbaascli config getDatabases"
+- name: "Topology | Run dbaascli database getDetails"
   ansible.builtin.command:
-    cmd: "{{ dbaascli_path }} config getDatabases --dbname {{ oracle_db_name | default(db_unique_name) }}"
+    cmd: "{{ dbaascli_path }} database getDetails --dbname {{ oracle_db_name | default(db_unique_name) }}"
   register: _dbaascli_config_raw
   become: true
   become_user: root
@@ -49,17 +49,17 @@
         | from_json
       }}
 
-- name: "Topology | Extract config for target database"
+- name: "Topology | Assert dbaascli returned valid config for target database"
   ansible.builtin.set_fact:
-    _db: "{{ _dbaascli_full_config[oracle_db_name | default(db_unique_name)] }}"
+    _db: "{{ _dbaascli_full_config }}"
 
 - name: "Topology | Assert dbaascli returned valid config for target database"
   ansible.builtin.assert:
     that:
-      - _db is defined
       - _db.dbName is defined
+      - _db.dbRole is defined
     fail_msg: >
-      dbaascli config getDatabases did not return a config block for
+      dbaascli database getDetails did not return expected fields for
       '{{ oracle_db_name | default(db_unique_name) }}'.
       Check --dbname value and that dbaascli can see this database.
     success_msg: "dbaascli config retrieved for {{ _db.dbName }}."
