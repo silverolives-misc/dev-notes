@@ -17,11 +17,8 @@ sqlplus_preamble: |
   SET COLSEP       '|'
   SET NULL         'NULL'
 
-# Oracle environment export block used in all shell tasks
-oracle_env: |
-  export ORACLE_HOME={{ oracle_home }}
-  export PATH=$ORACLE_HOME/bin:$PATH
-  export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
+# Oracle environment — source the per-database env file present on ExaCC hosts
+oracle_env: ". /home/oracle/{{ db_unique_name_actual }}.env"
 
-# sqlplus connect string (SCAN-based)
-sqlplus_connect: "sys/\"{{ current_sys_password }}\"@{{ scan_address }}:{{ oracle_port }}/{{ oracle_service }} as sysdba"
+# sqlplus connect string — local bequeath via ORACLE_SID (set by env file, no listener needed)
+sqlplus_connect: "sys/\"{{ current_sys_password }}\" as sysdba"

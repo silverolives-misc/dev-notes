@@ -108,11 +108,10 @@
         | first
       }}
 
-- name: "Topology | Set SCAN address, port and service from connect string"
+- name: "Topology | Set SCAN address and port from connect string"
   ansible.builtin.set_fact:
     scan_address: "{{ _primary_cs.split(':')[0] }}"
     oracle_port:  "{{ _primary_cs.split(':')[1].split('/')[0] }}"
-    oracle_service: "{{ _primary_cs.split('/')[1] }}"
 
 # ==============================================================================
 # Section 5 — PDB status list
