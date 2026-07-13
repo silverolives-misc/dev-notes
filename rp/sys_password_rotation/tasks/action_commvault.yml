@@ -11,6 +11,13 @@
 #   false — attempt to update Commvault credentials via simpana CLI
 # ------------------------------------------------------------------------------
 
+- name: "Commvault Action | Skip if CV Oracle user is not the rotated user"
+  ansible.builtin.debug:
+    msg: >
+      Commvault detected but CV Oracle user is '{{ commvault_ora_user }}',
+      not '{{ target_user }}'. No credential update required.
+  when: commvault_ora_user | upper != target_user | upper
+
 - name: "Commvault Action | Display Commvault detection summary"
   ansible.builtin.debug:
     msg:
@@ -25,12 +32,15 @@
       - "ACTION REQUIRED : Commvault credentials must be updated before"
       - "                  the rollover window expires."
       - "============================================="
+  when: commvault_ora_user | upper == target_user | upper
 
 # --- Notify Only Mode ---------------------------------------------------------
 
 - name: "Commvault Action | Write rotation notice to log (notify mode)"
-  ansible.builtin.copy:
-    content: |
+  ansible.builtin.shell:
+    cmd: |
+      mkdir -p "$(dirname '{{ commvault_notification_log }}')"
+      cat >> "{{ commvault_notification_log }}" <<'CVNOTICE'
       ================================================================================
       COMMVAULT CREDENTIAL UPDATE REQUIRED
       ================================================================================
@@ -43,8 +53,8 @@
       CV Oracle User  : {{ commvault_ora_user }}
 
       ACTION REQUIRED:
-      The SYS password has been rotated. Commvault connects to this database
-      using Oracle credentials for RMAN backup operations.
+      The {{ target_user }} password has been rotated. Commvault connects to this
+      database using Oracle credentials for RMAN backup operations.
 
       You MUST update the Commvault credential for this database before the
       PASSWORD_ROLLOVER_TIME window expires
@@ -57,25 +67,18 @@
         4. Update the SYSDBA/SYS password with the new credential
         5. Run a test backup to confirm connectivity
 
-      Alternatively update via Commvault Command Line:
-        qlogin -cs [commserve_hostname] -u [admin_user]
-        qoperation execscript -sn QS_UpdateOracleInstanceCredentials \
-          -si [client_name] -si [instance_name]
-
       Vault Role (new password):
         {{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ vault_role_name }}
-
-      If Commvault backup fails after this date the old password will no longer
-      be valid and manual credential recovery will be required.
       ================================================================================
-    dest: "{{ commvault_notification_log }}"
-    mode: '0640'
-    owner: root
-    group: root
+      CVNOTICE
+      chmod 0640 "{{ commvault_notification_log }}"
   become: true
   become_user: root
   delegate_to: "{{ node_fqdn }}"
-  when: commvault_notify_only | bool
+  changed_when: true
+  when:
+    - commvault_ora_user | upper == target_user | upper
+    - commvault_notify_only | bool
 
 - name: "Commvault Action | Display notice path"
   ansible.builtin.debug:
@@ -84,7 +87,9 @@
       {{ commvault_notification_log }} on {{ node_fqdn }}.
       A Commvault administrator must update credentials before the
       rollover window ({{ profile_limits.PASSWORD_ROLLOVER_TIME | default('unknown') }} days) expires.
-  when: commvault_notify_only | bool
+  when:
+    - commvault_ora_user | upper == target_user | upper
+    - commvault_notify_only | bool
 
 # --- Auto Update Mode ---------------------------------------------------------
 
@@ -142,7 +147,7 @@
     {{ oracle_env }}
     sqlplus -s /nolog <<EOF
     {{ sqlplus_preamble }}
-    CONNECT sys/"{{ new_sys_password }}"@{{ scan_address }}:{{ oracle_port }}/{{ oracle_service }} as sysdba
+    CONNECT {{ sqlplus_connect }}
     SELECT NVL(MAX(TO_CHAR(start_time,'YYYY-MM-DD HH24:MI')),'NONE') ||'|'||
            NVL(MAX(status),'NONE')
     FROM   v\$rman_backup_job_details
