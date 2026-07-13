@@ -13,6 +13,11 @@ vault_namespace:        ""                            # X-Vault-Namespace header
 vault_token_ttl:        "6h"                          # TTL for the login token
 
 # ------------------------------------------------------------------------------
+# Target Oracle user to rotate
+# ------------------------------------------------------------------------------
+target_user: "SYS"
+
+# ------------------------------------------------------------------------------
 # Large-estate tuning (Phase 1 discovery)
 # ------------------------------------------------------------------------------
 
@@ -46,14 +51,14 @@ oracle_service: "{{ db_unique_name }}"
 oracle_home:    "/u01/app/oracle/product/19.0.0.0/dbhome_1"
 
 # dbaascli
-dbaascli_path: "/usr/local/bin/dbaascli"
+dbaascli_path: "/bin/dbaascli"
 
 # ------------------------------------------------------------------------------
 # Pre-check thresholds
 # ------------------------------------------------------------------------------
-dg_max_lag_seconds:           300
+dg_max_lag_seconds:            300
 sys_session_warning_threshold: 5
-fail_on_active_rman:          true
+fail_on_active_rman:           true
 
 # ------------------------------------------------------------------------------
 # Topology overrides
