@@ -57,13 +57,14 @@
     - breakglass_backup_enabled | bool
 
 - name: "Evaluate | Write break-glass backup of current password"
-  ansible.builtin.copy:
-    content: |
+  ansible.builtin.shell:
+    cmd: |
+      cat > "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt" <<'BREAKGLASS'
       # Break-glass password backup
-      # Database    : {{ oracle_service }}
+      # Database    : {{ oracle_service | default('') }}
       # DB Unique   : {{ db_unique_name }}
       # Host        : {{ node_fqdn }}
-      # SCAN        : {{ scan_address }}
+      # SCAN        : {{ scan_address | default('') }}
       # Timestamp   : {{ ansible_date_time.iso8601 }}
       # Vault Role  : {{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ vault_role_name }}
       # DG Detected : {{ dg_detected | default(false) }}
@@ -74,14 +75,13 @@
       # DELETE this file once rotation is confirmed successful.
       #
       SYS_PASSWORD={{ current_sys_password }}
-    dest: "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
-    mode: '0600'
-    owner: root
-    group: root
+      BREAKGLASS
+      chmod 0600 "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
   no_log: true
   become: true
   become_user: root
   delegate_to: "{{ node_fqdn }}"
+  changed_when: true
   when:
     - rotation_required | bool
     - breakglass_backup_enabled | bool
