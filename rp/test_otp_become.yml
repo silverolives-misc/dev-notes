@@ -1,0 +1,134 @@
+---
+# ------------------------------------------------------------------------------
+# test_otp_become.yml
+# Proves OTP become behaviour across multiple su transitions.
+#
+# Usage:
+#   ansible-playbook test_otp_become.yml \
+#     -e target_host=gbxccwg9033.systems.uk._client_
+#
+# What this tests:
+#   [1] become root   — first su with play-level root OTP
+#   [2] become root   — second su — proves OTP is session-scoped (not per-use)
+#   [3] become oracle — task-level oracle OTP override
+#   [4] become root   — confirms play-level root OTP is restored after [3]
+#   [5] become oracle — WITHOUT task-level var — expected to FAIL (uses root OTP for oracle su)
+#
+# Expected results if OTP is session-scoped:
+#   [1] OK  [2] OK  [3] OK  [4] OK  [5] FAILED (wrong password for oracle su)
+#
+# If [2] fails — OTP is per-use; play-level vars will not work for the role.
+# If [5] passes — root OTP also works for oracle su (unexpected; investigate).
+# ------------------------------------------------------------------------------
+
+- name: "OTP Test | Obtain Vault token and build in-memory inventory"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+
+    - name: "OTP Test | Obtain Vault login token"
+      ansible.builtin.set_fact:
+        _login_token: "{{ lookup('_client_.epe.hashi_vault_login_token', token_ttl='1h') }}"
+      no_log: true
+
+    - name: "OTP Test | Add target host to in-memory inventory"
+      ansible.builtin.add_host:
+        name:         otp_test_host
+        ansible_host: "{{ target_host }}"
+        ansible_user: ans_oracle
+        login_token:  "{{ _login_token }}"
+
+
+- name: "OTP Test | Run become tests against target host"
+  hosts: otp_test_host
+  gather_facts: false
+  remote_user: ans_oracle
+  become_method: ansible.builtin.su
+  vars:
+    ansible_ssh_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
+        login_token=login_token,
+        ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
+        account='ans_oracle') }}"
+    ansible_become_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
+        login_token=login_token,
+        ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
+        account='root') }}"
+
+  tasks:
+
+    - name: "OTP Test | [1] become root — first su"
+      ansible.builtin.command: id
+      become: true
+      become_user: root
+      register: result_root_1
+      changed_when: false
+
+    - name: "OTP Test | [1] result"
+      ansible.builtin.debug:
+        msg: "become root #1: {{ result_root_1.stdout }}"
+
+    - name: "OTP Test | [2] become root — second su (fails if OTP is per-use)"
+      ansible.builtin.command: id
+      become: true
+      become_user: root
+      register: result_root_2
+      changed_when: false
+      failed_when: false
+
+    - name: "OTP Test | [2] result"
+      ansible.builtin.debug:
+        msg: "become root #2: {{ result_root_2.stdout | default('FAILED') }}"
+
+    - name: "OTP Test | [3] become oracle — task-level oracle OTP (role pattern)"
+      ansible.builtin.command: id
+      become: true
+      become_user: oracle
+      register: result_oracle_with_otp
+      changed_when: false
+      failed_when: false
+      vars:
+        ansible_become_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
+            login_token=login_token,
+            ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
+            account='oracle') }}"
+
+    - name: "OTP Test | [3] result"
+      ansible.builtin.debug:
+        msg: "become oracle (task-level OTP): {{ result_oracle_with_otp.stdout | default('FAILED') }}"
+
+    - name: "OTP Test | [4] become root — after oracle task (confirms play-level OTP restored)"
+      ansible.builtin.command: id
+      become: true
+      become_user: root
+      register: result_root_after_oracle
+      changed_when: false
+      failed_when: false
+
+    - name: "OTP Test | [4] result"
+      ansible.builtin.debug:
+        msg: "become root after oracle task: {{ result_root_after_oracle.stdout | default('FAILED') }}"
+
+    - name: "OTP Test | [5] become oracle — WITHOUT task-level OTP (should fail)"
+      ansible.builtin.command: id
+      become: true
+      become_user: oracle
+      register: result_oracle_no_otp
+      changed_when: false
+      failed_when: false
+
+    - name: "OTP Test | [5] result"
+      ansible.builtin.debug:
+        msg: "become oracle (no task-level OTP): {{ result_oracle_no_otp.stdout | default('FAILED — expected') }}"
+
+    - name: "OTP Test | Summary"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - " OTP Become Test Summary"
+          - "============================================================"
+          - "[1] become root #1           : {{ 'OK' if result_root_1.rc == 0 else 'FAILED' }}"
+          - "[2] become root #2           : {{ 'OK — OTP is SESSION-SCOPED' if result_root_2.rc == 0 else 'FAILED — OTP is PER-USE (play-level vars unsafe)' }}"
+          - "[3] become oracle (task OTP) : {{ 'OK — task-level override works' if result_oracle_with_otp.rc | default(1) == 0 else 'FAILED — oracle OTP pattern broken' }}"
+          - "[4] become root after oracle : {{ 'OK — play-level OTP restored' if result_root_after_oracle.rc | default(1) == 0 else 'FAILED — task-level var leaked' }}"
+          - "[5] become oracle (no OTP)   : {{ 'FAILED (expected — root OTP rejected for oracle su)' if result_oracle_no_otp.rc | default(1) != 0 else 'OK — root OTP works for oracle su (unexpected)' }}"
+          - "============================================================"
