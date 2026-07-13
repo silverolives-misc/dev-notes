@@ -124,22 +124,3 @@
       dbaascli not found or not executable at '{{ dbaascli_path }}'.
     success_msg: "dbaascli is available at {{ dbaascli_path }}."
 
-- name: "Session Pre-check | Check pexpect is available for expect module"
-  ansible.builtin.command:
-    cmd: python3 -c "import pexpect; print(pexpect.__version__)"
-  register: pexpect_check
-  delegate_to: "{{ node_fqdn }}"
-  become: true
-  become_user: root
-  changed_when: false
-  failed_when: false
-
-- name: "Session Pre-check | Assert pexpect is installed"
-  ansible.builtin.assert:
-    that:
-      - pexpect_check.rc == 0
-    fail_msg: >
-      Python pexpect module is not installed on {{ node_fqdn }}.
-      The rotate task uses ansible.builtin.expect which requires pexpect >= 3.3.
-      Install with: pip3 install 'pexpect>=3.3'
-    success_msg: "pexpect {{ pexpect_check.stdout | trim }} is available."

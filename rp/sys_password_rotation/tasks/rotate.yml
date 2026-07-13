@@ -1,23 +1,21 @@
 ---
 # ------------------------------------------------------------------------------
 # rotate.yml
-# Execute SYS password rotation via dbaascli and update Vault KV2
+# Execute SYS password rotation via dbaascli and update Vault
 # When DG is detected, uses --prepareStandbyBlob to propagate to standbys
 #
-# dbaascli prompts for the new password interactively; ansible.builtin.expect
-# (backed by pexpect) feeds it. Requires pexpect >= 3.3 on the target host.
+# Password is fed via printf pipe — no pexpect dependency required.
 # ------------------------------------------------------------------------------
 
 - name: "Rotate | Change SYS password via dbaascli (non-DG)"
-  ansible.builtin.expect:
-    command: >-
-      {{ dbaascli_path }} database changePassword
+  ansible.builtin.shell:
+    cmd: >-
+      printf '%s\n%s\n' "${DBAAS_NEW_PASS}" "${DBAAS_NEW_PASS}"
+      | {{ dbaascli_path }} database changePassword
       --dbname {{ oracle_db_name | default(db_unique_name) }}
       --user SYS
-    responses:
-      '(?i)(new password|password for SYS|enter password)': "{{ new_sys_password }}"
-      '(?i)(confirm|re-enter|retype)': "{{ new_sys_password }}"
-    timeout: 120
+  environment:
+    DBAAS_NEW_PASS: "{{ new_sys_password }}"
   register: dbaascli_result
   no_log: true
   become: true
@@ -28,17 +26,16 @@
   when: not dg_detected | default(false) | bool
 
 - name: "Rotate | Change SYS password via dbaascli (DG — prepare standby blob)"
-  ansible.builtin.expect:
-    command: >-
-      {{ dbaascli_path }} database changePassword
+  ansible.builtin.shell:
+    cmd: >-
+      printf '%s\n%s\n' "${DBAAS_NEW_PASS}" "${DBAAS_NEW_PASS}"
+      | {{ dbaascli_path }} database changePassword
       --dbname {{ oracle_db_name | default(db_unique_name) }}
       --user SYS
       --prepareStandbyBlob true
       --blobLocation /tmp/{{ db_unique_name }}_sys_blob_{{ ansible_date_time.date }}
-    responses:
-      '(?i)(new password|password for SYS|enter password)': "{{ new_sys_password }}"
-      '(?i)(confirm|re-enter|retype)': "{{ new_sys_password }}"
-    timeout: 120
+  environment:
+    DBAAS_NEW_PASS: "{{ new_sys_password }}"
   register: dbaascli_dg_result
   no_log: true
   become: true
