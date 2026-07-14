@@ -54,46 +54,46 @@
       when: rotation_required | default(false) | bool
 
     - name: "Phase 12 | Record rotation success for summary"
-      ansible.builtin.set_stats:
-        data:
-          rotation_summary: >-
-            {{
-              (rotation_summary | default({})) | combine({
-                db_unique_name | default(inventory_hostname): {
-                  'status':    'ROTATED' if (rotation_required | default(false) | bool) else 'SKIPPED',
-                  'host':      ansible_host,
-                  'vault_role': vault_role_name | default(''),
-                  'node':      node_fqdn | default(''),
-                  'db_role':   db_role | default('UNKNOWN'),
-                  'dg':        dg_detected | default(false),
-                  'commvault': commvault_detected | default(false),
-                  'secret_age': secret_age_days | default(0)
-                }
-              })
-            }}
-        aggregate: true
+      ansible.builtin.set_fact:
+        rotation_summary: >-
+          {{
+            hostvars['localhost']['rotation_summary'] | default({}) | combine({
+              db_unique_name | default(inventory_hostname): {
+                'status':     'ROTATED' if (rotation_required | default(false) | bool) else 'SKIPPED',
+                'host':       ansible_host,
+                'vault_role': vault_role_name | default(''),
+                'node':       node_fqdn | default(''),
+                'db_role':    db_role | default('UNKNOWN'),
+                'dg':         dg_detected | default(false),
+                'commvault':  commvault_detected | default(false),
+                'secret_age': secret_age_days | default(0)
+              }
+            })
+          }}
+      delegate_to: localhost
+      delegate_facts: true
 
   rescue:
 
     - name: "Record failure for end-of-run summary"
-      ansible.builtin.set_stats:
-        data:
-          rotation_failures: >-
-            {{
-              (rotation_failures | default({})) | combine({
-                db_unique_name | default(inventory_hostname): {
-                  'host':        ansible_host | default(inventory_hostname),
-                  'failed_task': ansible_failed_task.name | default('unknown'),
-                  'error':       ansible_failed_result.msg
-                                 | default(ansible_failed_result.stderr
-                                 | default(ansible_failed_result.stdout
-                                 | default('See playbook logs')))
-                                 | regex_replace('\n', ' ')
-                                 | truncate(120)
-                }
-              })
-            }}
-        aggregate: true
+      ansible.builtin.set_fact:
+        rotation_failures: >-
+          {{
+            hostvars['localhost']['rotation_failures'] | default({}) | combine({
+              db_unique_name | default(inventory_hostname): {
+                'host':        ansible_host | default(inventory_hostname),
+                'failed_task': ansible_failed_task.name | default('unknown'),
+                'error':       ansible_failed_result.msg
+                               | default(ansible_failed_result.stderr
+                               | default(ansible_failed_result.stdout
+                               | default('See playbook logs')))
+                               | regex_replace('\n', ' ')
+                               | truncate(120)
+              }
+            })
+          }}
+      delegate_to: localhost
+      delegate_facts: true
       no_log: true
 
     - name: "Re-fail host after recording failure"
