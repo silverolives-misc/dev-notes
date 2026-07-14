@@ -13,10 +13,12 @@
     {{ oracle_env }}
     sqlplus -s /nolog <<EOF
     {{ sqlplus_preamble }}
-    CONNECT sys/"{{ new_sys_password }}"@{{ scan_address }}:{{ oracle_port }}/{{ oracle_service }} as sysdba
+    CONNECT sys/"$SQLPLUS_CONN" as sysdba
     SELECT 'CONNECTION_OK' FROM dual;
     EXIT;
     EOF
+  environment:
+    SQLPLUS_CONN: "{{ new_sys_password }}"
   register: post_connect_check
   delegate_to: "{{ node_fqdn }}"
   become: true
@@ -46,10 +48,12 @@
     {{ oracle_env }}
     sqlplus -s /nolog <<EOF
     {{ sqlplus_preamble }}
-    CONNECT sys/"{{ new_sys_password }}"@{{ scan_address }}:{{ oracle_port }}/{{ oracle_service }} as sysdba
+    CONNECT sys/"$SQLPLUS_CONN" as sysdba
     SELECT account_status FROM dba_users WHERE username = 'SYS';
     EXIT;
     EOF
+  environment:
+    SQLPLUS_CONN: "{{ new_sys_password }}"
   register: post_status_raw
   delegate_to: "{{ node_fqdn }}"
   become: true
@@ -106,12 +110,13 @@
       {{ vault_post_role.json.data.current_version }}.
 
 - name: "Post-validate | Remove break-glass backup after confirmed success"
-  ansible.builtin.file:
-    path: "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
-    state: absent
+  ansible.builtin.shell:
+    cmd: >-
+      rm -f "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
   become: true
   become_user: root
   delegate_to: "{{ node_fqdn }}"
+  changed_when: true
   when: breakglass_backup_enabled | bool
 
 - name: "Post-validate | Display final rotation summary"
