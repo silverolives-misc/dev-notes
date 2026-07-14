@@ -110,13 +110,12 @@
       {{ vault_post_role.json.data.current_version }}.
 
 - name: "Post-validate | Remove break-glass backup after confirmed success"
-  ansible.builtin.shell:
-    cmd: >-
-      rm -f "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
+  ansible.builtin.file:
+    path: "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
+    state: absent
   become: true
   become_user: root
   delegate_to: "{{ node_fqdn }}"
-  changed_when: true
   when: breakglass_backup_enabled | bool
 
 - name: "Post-validate | Display final rotation summary"
@@ -137,10 +136,9 @@
       - "Vault Role      : {{ vault_role_name }}"
       - "Vault Engine    : {{ vault_engine_url }}/v1/{{ vault_engine_mount }}"
       - "Vault Version   : {{ vault_pre_rotation_version }} → {{ vault_post_role.json.data.current_version }}"
-      - "Rotated At      : {{ vault_post_role.json.data.created_at | default(ansible_date_time.iso8601) }}"
       - "Rotated At      : {{ ansible_date_time.iso8601 }}"
       - "Rotated By      : {{ ansible_user_id }}"
       - "============================================="
-      - "{% if commvault_detected | default(false) %}ACTION: Update Commvault credentials — see {{ commvault_notification_log }}{% endif %}"
+      - "{% if commvault_detected | default(false) and commvault_ora_user | upper == target_user | upper %}ACTION: Update Commvault credentials — see {{ commvault_notification_log }}{% endif %}"
       - "{% if dg_detected | default(false) %}DG standbys updated via dbaascli blob propagation{% endif %}"
       - "============================================="
