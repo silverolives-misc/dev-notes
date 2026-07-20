@@ -6,8 +6,12 @@
 # playbook's add_host tasks: leader/primary/master or replica/standby_leader.
 
 # -- Patroni service / CLI ------------------------------------------------
+# pip-installed Patroni lives in a virtualenv. patronictl's shebang already
+# points at the venv's own python, so calling it by its venv path runs it
+# correctly without needing to `source activate` first.
 patroni_service_name: patroni
-patronictl_bin: patronictl
+patroni_venv_path: /opt/patroni/venv
+patronictl_bin: "{{ patroni_venv_path }}/bin/patronictl"
 patroni_config_file: /etc/patroni/patroni.yml
 patroni_scope: postgres-cluster
 

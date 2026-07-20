@@ -1,0 +1,225 @@
+---
+# generate_oracle_static_role_tfvars.yml
+#
+# Scales to a flat "exacc_nodes" inventory spanning MANY separate RAC
+# clusters (not just one), by:
+#   1. Fingerprinting each node's cluster membership via `olsnodes`
+#      (cheap, read-only, safe to run on every node in parallel).
+#   2. Selecting exactly ONE representative host per unique fingerprint.
+#   3. Running the actual srvctl discovery only on representatives —
+#      each one covers a distinct cluster, so this is correct in
+#      parallel with no run_once assumption.
+#   4. Aggregating all representatives' results into a single dict and
+#      writing the tfvars file exactly once, avoiding the write-race
+#      that would happen if every representative wrote to the same path.
+#
+# If your inventory already tags cluster membership (a group per cluster,
+# or a hostvar like exacc_cluster_name), skip play 1+2 and group by that
+# directly — it's cheaper than querying every node. This self-discovers
+# instead, so it works even when inventory metadata can't be trusted.
+#
+# Confirmed role schema (from a live role read against the plugin):
+#   role name : <USERNAME>_<db_unique_name>_EXACC        (uppercase)
+#   role data : { username, connection_url }
+#     connection_url = comma-separated FQDNs of the RAC nodes
+#
+# password / created_at / current_version / version / deleted / deleted_at
+# are plugin-managed and excluded from this tfvars — the initial password
+# is generated inside Terraform via random_password instead.
+#
+# ---------------------------------------------------------------------------
+# Output: the tfvars live in a git-controlled repo, and this playbook has
+# no business writing to or committing into that repo directly — so the
+# aggregated oracle_static_roles map is exposed via set_stats (per_host:
+# false) instead of a file write. A separate pipeline step is expected to
+# read the stat and handle the actual file update / commit / PR.
+#
+# To retrieve it:
+#   - AWX / Ansible Controller: custom stats are captured automatically
+#     as job artifacts — no extra config needed.
+#   - Raw ansible-playbook CLI: set show_custom_stats, e.g.
+#       ANSIBLE_SHOW_CUSTOM_STATS=true ANSIBLE_STDOUT_CALLBACK=json \
+#         ansible-playbook -i inventory generate_oracle_static_role_tfvars.yml -f 50
+#     then parse `.stats.custom` from the JSON output. Older ansible-core
+#     versions have had bugs where the json callback didn't surface
+#     custom stats reliably (ansible/ansible#42871) — verify against your
+#     actual version before wiring a pipeline around it. If that turns
+#     out to be flaky, the fallback is a plain debug task printing the
+#     JSON between unique markers for the pipeline step to grep out of
+#     stdout, independent of callback behaviour.
+#
+# Run with (bump forks well above the ansible.cfg default of 5 — these are
+# lightweight read-only clusterware queries, high parallelism is safe):
+#
+#   ansible-playbook -i inventory generate_oracle_static_role_tfvars.yml \
+#     -f 50 \
+#     -e grid_home=/u01/app/19.0.0.0/grid \
+#     -e dns_domain=systems.uk.hsbc
+# ---------------------------------------------------------------------------
+
+- name: Fingerprint clusterware membership on every node
+  hosts: exacc_nodes
+  become: true
+  become_user: oracle
+  gather_facts: false
+  strategy: free          # don't let one slow/unreachable node hold up the batch
+  ignore_unreachable: true
+
+  vars:
+    grid_home: "/u01/app/19.0.0.0/grid"
+    srvctl_env:
+      PATH: "{{ grid_home }}/bin:/usr/bin:/bin"
+
+  tasks:
+    - name: List this host's cluster peers (olsnodes is local-cluster-scoped)
+      ansible.builtin.command: olsnodes
+      environment: "{{ srvctl_env }}"
+      register: olsnodes_result
+      changed_when: false
+      ignore_unreachable: true
+
+    - name: Record a canonical fingerprint for this host's cluster
+      ansible.builtin.set_fact:
+        cluster_fingerprint: "{{ olsnodes_result.stdout_lines | reject('equalto', '') | sort | join(',') }}"
+      when: olsnodes_result is succeeded
+
+
+- name: Select one representative host per unique cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    all_exacc_hosts: "{{ groups['exacc_nodes'] }}"
+
+  tasks:
+    # Dedup via a plain Jinja2 for-loop rather than filter-chaining — much
+    # easier to verify correct than trying to force groupby/zip to do it.
+    - name: Render one representative per unique cluster fingerprint as JSON
+      ansible.builtin.set_fact:
+        cluster_representatives_json: |-
+          {%- set seen = [] -%}
+          {%- set reps = [] -%}
+          {%- for h in all_exacc_hosts -%}
+            {%- if hostvars[h].cluster_fingerprint is defined -%}
+              {%- set fp = hostvars[h].cluster_fingerprint -%}
+              {%- if fp not in seen -%}
+                {%- set _ = seen.append(fp) -%}
+                {%- set _ = reps.append(h) -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ reps | to_json }}
+
+    - name: Parse representative host list
+      ansible.builtin.set_fact:
+        cluster_representatives: "{{ cluster_representatives_json | from_json }}"
+
+    - name: Register representatives into a dynamic group
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: exacc_cluster_representatives
+      loop: "{{ cluster_representatives }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Summarise discovery
+      ansible.builtin.debug:
+        msg: >-
+          {{ cluster_representatives | length }} distinct cluster(s) found
+          among {{ all_exacc_hosts | length }} inventory node(s)
+          ({{ all_exacc_hosts | length - (all_exacc_hosts | map('extract', hostvars) | selectattr('cluster_fingerprint', 'defined') | list | length) }}
+          node(s) had no fingerprint recorded — unreachable or olsnodes failed — and were excluded).
+
+
+- name: Discover DB topology per cluster (one run per representative)
+  hosts: exacc_cluster_representatives
+  become: true
+  become_user: oracle
+  gather_facts: false
+  strategy: free
+  ignore_unreachable: true
+
+  vars:
+    grid_home: "/u01/app/19.0.0.0/grid"
+    srvctl_env:
+      PATH: "{{ grid_home }}/bin:/usr/bin:/bin"
+    dns_domain: "systems.uk.hsbc"
+    oracle_role_usernames:
+      - sys
+    role_suffix: "EXACC"
+    debug_output: false   # set true (-e debug_output=true) to dump per-cluster maps; noisy at 200+ clusters
+
+  tasks:
+    - name: Get list of configured database unique names for this cluster
+      ansible.builtin.command: srvctl config database
+      environment: "{{ srvctl_env }}"
+      register: srvctl_db_list
+      changed_when: false
+
+    - name: Build fact with db unique names (drop blank lines)
+      ansible.builtin.set_fact:
+        exacc_db_unique_names: "{{ srvctl_db_list.stdout_lines | reject('equalto', '') | list }}"
+
+    - name: Get host topology for each database in this cluster
+      ansible.builtin.command: srvctl status database -db "{{ item }}"
+      environment: "{{ srvctl_env }}"
+      loop: "{{ exacc_db_unique_names }}"
+      register: srvctl_db_status
+      changed_when: false
+
+    - name: Build db_unique_name -> [hosts] topology map (short hostnames)
+      ansible.builtin.set_fact:
+        exacc_db_topology: "{{ exacc_db_topology | default({}) | combine({item.item: (item.stdout | regex_findall('is running on node (\\S+)') | unique | sort)}) }}"
+      loop: "{{ srvctl_db_status.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Build oracle_static_roles map for this cluster (role_name -> attrs)
+      ansible.builtin.set_fact:
+        oracle_static_roles: "{{ oracle_static_roles | default({}) | combine({role_key: role_val}) }}"
+      vars:
+        db_unique_name: "{{ item.0 }}"
+        db_hosts: "{{ exacc_db_topology[item.0] }}"
+        db_fqdns: "{{ db_hosts | map('regex_replace', '$', '.' ~ dns_domain) | list }}"
+        role_username: "{{ item.1 | upper }}"
+        role_key: "{{ role_username }}_{{ db_unique_name | upper }}_{{ role_suffix }}"
+        role_val:
+          username: "{{ role_username }}"
+          connection_url: "{{ db_fqdns | join(',') }}"
+      with_nested:
+        - "{{ exacc_db_topology.keys() | list }}"
+        - "{{ oracle_role_usernames }}"
+      loop_control:
+        label: "{{ item.0 }}/{{ item.1 }}"
+
+    - name: Show this cluster's role map (troubleshooting only)
+      ansible.builtin.debug:
+        var: oracle_static_roles
+      when: debug_output | bool
+
+
+- name: Aggregate all clusters and expose result via set_stats
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    # Single aggregation point, single host — no race, no file to commit.
+    - name: Combine oracle_static_roles across every cluster representative
+      ansible.builtin.set_fact:
+        oracle_static_roles_all: "{{ oracle_static_roles_all | default({}) | combine(hostvars[item].oracle_static_roles | default({})) }}"
+      loop: "{{ groups['exacc_cluster_representatives'] | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Summarise total roles generated
+      ansible.builtin.debug:
+        msg: "{{ oracle_static_roles_all | length }} role(s) across {{ groups['exacc_cluster_representatives'] | default([]) | length }} cluster(s)"
+
+    - name: Expose aggregated roles as a play-level custom stat
+      ansible.builtin.set_stats:
+        data:
+          oracle_static_roles: "{{ oracle_static_roles_all }}"
+        per_host: false
+        aggregate: false   # single call — nothing to accumulate across
