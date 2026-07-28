@@ -27,7 +27,7 @@
     success_msg: "Vault credential hostvars confirmed present."
   no_log: true
 
-- name: "Vault Pre-check | Assert secret is not too new to rotate"
+- name: "Vault Pre-check | Assert secret is not too new to rotate" # noqa: no-log-password
   ansible.builtin.assert:
     that:
       - secret_age_days | int >= password_min_age_days | int
@@ -51,7 +51,7 @@
   register: vault_role_meta
   no_log: true
 
-- name: "Vault Pre-check | Assert role is reachable and has expected fields"
+- name: "Vault Pre-check | Assert role is reachable and has expected fields" # noqa: no-log-password
   ansible.builtin.assert:
     that:
       - vault_role_meta.status == 200
@@ -70,7 +70,7 @@
     vault_pre_rotation_timestamp: "{{ vault_role_meta.json.data.created_at }}"
     vault_pre_rotation_version:   "{{ vault_role_meta.json.data.current_version | int }}"
 
-- name: "Vault Pre-check | Display rotation context"
+- name: "Vault Pre-check | Display rotation context" # noqa: no-log-password
   ansible.builtin.debug:
     msg:
       - "Vault role         : {{ vault_role_name }}"

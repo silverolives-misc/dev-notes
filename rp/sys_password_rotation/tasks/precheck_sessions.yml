@@ -54,7 +54,7 @@
       - "Active SYS sessions : {{ sys_active_session_count }}"
       - "Programs connected  : {{ sys_sessions | map(attribute=4) | unique | list }}"
 
-- name: "Session Pre-check | Warn if SYS sessions exceed threshold"
+- name: "Session Pre-check | Warn if SYS sessions exceed threshold" # noqa: no-log-password
   ansible.builtin.debug:
     msg: >
       WARNING: {{ sys_active_session_count }} active SYS session(s) found

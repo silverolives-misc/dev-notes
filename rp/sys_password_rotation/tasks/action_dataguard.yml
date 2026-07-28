@@ -42,6 +42,7 @@
   become_user: oracle
   register: blob_copy_result
   failed_when: blob_copy_result.rc != 0
+  no_log: true
   vars:
     ansible_become_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
         login_token=hostvars[inventory_hostname]['login_token'],
@@ -71,7 +72,7 @@
   changed_when: standby_rotate_result.rc == 0
   failed_when: standby_rotate_result.rc != 0
 
-- name: "DG Action | Assert standby password propagation succeeded"
+- name: "DG Action | Assert standby password propagation succeeded" # noqa: no-log-password
   ansible.builtin.assert:
     that:
       - item.rc == 0
@@ -110,7 +111,7 @@
     label: "SYS_{{ item[0] }}_EXACC"
   register: vault_write_standby
 
-- name: "DG Action | Assert Vault writes succeeded for all standbys"
+- name: "DG Action | Assert Vault writes succeeded for all standbys" # noqa: no-log-password
   ansible.builtin.assert:
     that:
       - item.status in [200, 204]

@@ -32,7 +32,7 @@
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
         account='oracle') }}"
 
-- name: "Post-validate | Assert new password works"
+- name: "Post-validate | Assert new password works" # noqa: no-log-password
   ansible.builtin.assert:
     that:
       - post_connect_check.rc == 0
