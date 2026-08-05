@@ -1,0 +1,350 @@
+h1. rotate_password — Ansible Role Reference
+
+{panel:title=At a Glance|borderColor=#0B7A75|titleBGColor=#E6F4F3|borderWidth=2}
+*Role:* {{roles/rotate_password}}
+*Called by:* {{sys_password_rotation/main.yml}} (with {{target_user: "SYS"}})
+*Default target:* {{SYS}} — the role is generic and can rotate any Oracle account
+*Phases:* 11 sequential phases inside a single {{block/rescue}}
+*Failure behaviour:* Failure on one database is captured and recorded; the estate continues
+{panel}
+
+----
+
+h2. Objective
+
+Rotates an Oracle user's password on a single ExaCC database node. Designed to be called once per confirmed PRIMARY by the driving playbook. All pre-checks run before any mutation — the credential is only changed if all checks pass and {{rotation_required}} evaluates to {{true}}.
+
+The role is *generic*: the connect syntax, Data Guard propagation method, and break-glass file naming all adapt to the configured {{target_user}}.
+
+----
+
+h2. Role Structure
+
+{code}
+roles/rotate_password/
+├── tasks/
+│   ├── main.yml                     # Entry point — block/rescue wrapper
+│   ├── precheck_vault.yml           # Phase 1  — Vault role reachability + age gate
+│   ├── detect_topology.yml          # Phase 2  — dbaascli topology (role, SCAN, PDBs)
+│   ├── precheck_oracle.yml          # Phase 3  — Credential validation, account status
+│   ├── precheck_dataguard.yml       # Phase 4  — DG lag check (conditional)
+│   ├── precheck_password_policy.yml # Phase 5  — PASSWORD_ROLLOVER_TIME profile check
+│   ├── precheck_sessions.yml        # Phase 6  — Active sessions + RMAN gate
+│   ├── evaluate_rotation.yml        # Phase 7  — Age gate + break-glass write
+│   ├── rotate.yml                   # Phase 8  — dbaascli changePassword
+│   ├── action_dataguard.yml         # Phase 9  — Propagation to standbys (conditional)
+│   ├── action_commvault.yml         # Phase 10 — Commvault notification (conditional)
+│   └── post_validate.yml            # Phase 11 — New cred test + Vault version confirm
+├── defaults/main.yml
+├── vars/main.yml
+└── meta/main.yml
+{code}
+
+----
+
+h2. Inputs
+
+h3. Required Hostvars
+
+Supplied by the driving playbook via {{add_host}} in Phase 1. All values are stamped on the inventory host before Phase 2 begins.
+
+|| Variable || Description ||
+| {{db_unique_name}} | Oracle {{DB_UNIQUE_NAME}} |
+| {{oracle_db_name}} | Oracle {{DB_NAME}} — used with {{dbaascli --dbname}} |
+| {{node_fqdn}} | FQDN of the cluster node to SSH to |
+| {{current_oracle_password}} | Current credential from Vault {{/cred/}} endpoint |
+| {{secret_age_days}} | Age of the current Vault secret in days |
+| {{vault_role_name}} | Vault role name (e.g. {{SYS_DBPROD01_EXACC}}) |
+| {{vault_engine_url}} | Vault base URL |
+| {{vault_engine_mount}} | Vault engine mount path |
+| {{vault_namespace}} | Vault namespace |
+| {{login_token}} | Vault login token — used for OTP lookups and all Vault API calls |
+
+h3. Configurable Defaults (defaults/main.yml)
+
+h4. Vault
+
+|| Variable || Default || Description ||
+| {{vault_engine_url}} | _(empty)_ | Vault base URL |
+| {{vault_engine_mount}} | {{secrets/static-database}} | Engine mount point |
+| {{vault_namespace}} | _(empty)_ | Vault {{X-Vault-Namespace}} header |
+| {{vault_token_ttl}} | {{6h}} | Login token TTL |
+
+h4. Rotation Policy
+
+|| Variable || Default || Description ||
+| {{target_user}} | {{SYS}} | Oracle account to rotate |
+| {{password_max_age_days}} | {{90}} | Rotate if credential age exceeds this (days) |
+| {{password_min_age_days}} | {{1}} | Skip if rotated more recently than this (days) |
+| {{password_length}} | {{20}} | Generated password length |
+| {{min_rollover_time_days}} | {{0.0417}} (1 hour) | Minimum {{PASSWORD_ROLLOVER_TIME}} required on the Oracle profile |
+
+h4. Pre-check Thresholds
+
+|| Variable || Default || Description ||
+| {{dg_max_lag_seconds}} | {{300}} | Maximum tolerated Data Guard apply lag |
+| {{sys_session_warning_threshold}} | {{5}} | Warn (not fail) if active sessions exceed this count |
+| {{fail_on_active_rman}} | {{true}} | Abort rotation if an RMAN backup job is running |
+
+h4. Break-Glass
+
+|| Variable || Default || Description ||
+| {{breakglass_backup_enabled}} | {{true}} | Write backup of current credential before rotation |
+| {{breakglass_backup_path}} | {{/etc/oracle/breakglass}} | Directory for break-glass files (root-owned, mode {{0600}}) |
+
+Break-glass filenames follow the pattern: {{<db_unique_name>_<target_user_lower>_breakglass_<date>.txt}}
+
+h4. Commvault
+
+|| Variable || Default || Description ||
+| {{commvault_registry_path}} | {{/etc/CommVaultRegistry}} | Path used to detect Commvault installation |
+| {{commvault_process_name}} | {{cvd}} | Process used to confirm Commvault is running |
+| {{commvault_ora_user}} | {{sysbackup}} | Oracle account Commvault connects with |
+| {{commvault_notify_only}} | {{true}} | Log notification only — does not update Commvault credentials automatically |
+| {{commvault_notification_log}} | {{/var/log/ansible/commvault_rotation_notice.log}} | Notification log path |
+
+h3. Internal Variables (vars/main.yml)
+
+|| Variable || Description ||
+| {{sqlplus_preamble}} | Standard silent sqlplus header ({{WHENEVER SQLERROR}}, {{SET}} commands) |
+| {{oracle_env}} | Shell command to source {{/home/oracle/<db_unique_name>.env}} — sets {{ORACLE_SID}} and {{ORACLE_HOME}} |
+| {{sqlplus_connect}} | {{/ as sysdba}} — OS authentication string for account-status queries |
+
+----
+
+h2. Outputs
+
+The role writes its result back to {{localhost}} using {{delegate_to: localhost}} and {{delegate_facts: true}}. The driving playbook's Phase 3 reads these accumulated facts to build the final {{rotation_report}}.
+
+h3. Success (Phase 12)
+
+Appended to {{hostvars['localhost']['rotation_summary']}}:
+
+{code:language=json}
+{
+  "DBPROD01": {
+    "status": "ROTATED",
+    "host": "exacc-node1.example.com",
+    "vault_role": "SYS_DBPROD01_EXACC",
+    "node": "exacc-node1.example.com",
+    "db_role": "PRIMARY",
+    "dg": true,
+    "commvault": false,
+    "secret_age": 94.3
+  }
+}
+{code}
+
+{{status}} is {{ROTATED}} if rotation ran, or {{SKIPPED}} if the age gate determined rotation was not yet due.
+
+h3. Failure (rescue block)
+
+Appended to {{hostvars['localhost']['rotation_failures']}}:
+
+{code:language=json}
+{
+  "DBPROD01": {
+    "host": "exacc-node1.example.com",
+    "failed_task": "Oracle Pre-check | Validate current SYS credential from Vault",
+    "error": "Current SYS password from Vault does not authenticate against Oracle. Vault and Oracle are out of sync."
+  }
+}
+{code}
+
+The host is then re-failed via {{ansible.builtin.fail}} so it registers against {{max_fail_percentage}} in the driving playbook.
+
+----
+
+h2. Phase Detail
+
+|| # || File || Runs when || Description ||
+| *1* | {{precheck_vault.yml}} | Always | Assert {{current_oracle_password}}, {{login_token}}, {{vault_role_name}} are present. GET role metadata. Capture {{vault_pre_rotation_version}} baseline. |
+| *2* | {{detect_topology.yml}} | Always | {{dbaascli database getDetails --dbname}}. Sets {{db_role}}, {{scan_address}}, {{rac_nodes}}, {{pdb_list}}, {{dg_detected}}, {{commvault_detected}}. |
+| *3* | {{precheck_oracle.yml}} | Always | Validate current Vault credential via sqlplus. SYS uses {{CONNECT sys/"$PASS" as sysdba}}; other users use {{CONNECT user/"$PASS"}}. Assert {{db_role == PRIMARY}}. Query account status, expiry, and profile from {{dba_users}}. |
+| *4* | {{precheck_dataguard.yml}} | {{dg_detected == true}} | Check DG apply lag <= {{dg_max_lag_seconds}}. Assert no gap sequences. |
+| *5* | {{precheck_password_policy.yml}} | Always | Query {{dba_profiles}} for {{account_profile}}. Assert {{PASSWORD_ROLLOVER_TIME}} is set and >= {{min_rollover_time_days}}. Assert no rollover already in progress. |
+| *6* | {{precheck_sessions.yml}} | Always | Count active sessions in {{gv$session}}. Warn (not fail) if above {{sys_session_warning_threshold}}. Assert no running RMAN jobs. |
+| *7* | {{evaluate_rotation.yml}} | Always | Compare {{secret_age_days}} vs {{password_max_age_days}} to set {{rotation_required}}. If rotating: generate new credential, write break-glass file ({{chmod 0600}}, root-owned). |
+| *8* | {{rotate.yml}} | {{rotation_required == true}} | SYS+DG: {{dbaascli changePassword --user SYS --prepareStandbyBlob true}}. Non-SYS or non-DG: standard {{dbaascli changePassword --user <user>}}. Write new credential to Vault {{/role/}} endpoint. |
+| *9* | {{action_dataguard.yml}} | {{rotation_required and dg_detected}} | *SYS:* SCP blob to each standby -> {{dbaascli changePassword --standbyBlobFromPrimary}} -> clean up blob. *Non-SYS:* direct {{dbaascli changePassword}} on each standby. Both: POST new credential to Vault for each standby role. |
+| *10* | {{action_commvault.yml}} | {{rotation_required and commvault_detected and commvault_ora_user == target_user}} | Append rotation notice to {{commvault_notification_log}}. |
+| *11* | {{post_validate.yml}} | {{rotation_required == true}} | Connect sqlplus with new credential. Assert {{CONNECTION_OK}} and account not LOCKED. GET Vault role and assert {{current_version}} incremented. Delete break-glass file. |
+| *12* | {{main.yml}} (inline) | Always | {{set_fact rotation_summary}} -> localhost via {{delegate_facts: true}}. |
+
+----
+
+h2. Data Guard Paths
+
+The propagation method in Phase 9 depends on {{target_user}}:
+
+|| Scenario || Phase 8 || Phase 9 ||
+| SYS + DG detected | {{dbaascli changePassword --user SYS --prepareStandbyBlob true}} | SCP blob -> each standby -> {{dbaascli changePassword --standbyBlobFromPrimary}} -> delete blob -> update Vault per standby role |
+| Non-SYS + DG detected | Standard {{dbaascli changePassword --user <user>}} on primary | Direct {{dbaascli changePassword --user <user>}} on each standby -> update Vault per standby role |
+| Any user + no DG | Standard {{dbaascli changePassword --user <user>}} on primary | Phase 9 does not run |
+
+{note:title=Why blobs are SYS-only}
+The {{--prepareStandbyBlob}} / {{--standbyBlobFromPrimary}} mechanism is a native ExaCC feature for propagating the SYS password hash through the Data Guard redo transport layer without needing direct DBA connectivity to each standby. It is available for SYS only. For other Oracle accounts in a DG environment, the role connects to each standby directly.
+{note}
+
+----
+
+h2. Sequence Diagram
+
+{mermaid}
+sequenceDiagram
+    autonumber
+    participant PB as Playbook (Phase 2)
+    participant Vault as HashiCorp Vault
+    participant ExaCC as ExaCC Node
+    participant Oracle as Oracle DB (sqlplus)
+    participant DG as DG Standby Nodes
+
+    rect rgb(230, 240, 255)
+        Note over PB,Vault: Phase 1 — Vault Pre-check
+        PB->>Vault: GET /role/{vault_role_name}
+        Vault-->>PB: created_at, current_version (baseline)
+        PB->>PB: Assert current_oracle_password present; age >= min_age_days
+    end
+
+    rect rgb(230, 255, 230)
+        Note over PB,ExaCC: Phase 2 — Topology Detection
+        PB->>ExaCC: dbaascli database getDetails --dbname
+        ExaCC-->>PB: dbRole, SCAN, PDB list, topology flags
+        PB->>PB: Set db_role, dg_detected, commvault_detected
+    end
+
+    rect rgb(255, 245, 230)
+        Note over PB,Oracle: Phase 3 — Oracle Pre-check
+        ExaCC->>Oracle: CONNECT {target_user}/"$PASS"[ as sysdba if SYS]
+        Oracle-->>ExaCC: CREDENTIAL_OK
+        PB->>Oracle: SELECT from dba_users WHERE username = target_user
+        Oracle-->>PB: account_status, expiry_date, account_profile
+        PB->>PB: Assert db_role == PRIMARY; assert account not LOCKED
+    end
+
+    opt dg_detected == true
+        rect rgb(255, 230, 230)
+            Note over PB,Oracle: Phase 4 — Data Guard Pre-check
+            PB->>Oracle: SELECT lag from v$dataguard_stats
+            PB->>PB: Assert lag <= dg_max_lag_seconds; no gap sequences
+        end
+    end
+
+    rect rgb(245, 230, 255)
+        Note over PB,Oracle: Phase 5 — Password Policy
+        PB->>Oracle: SELECT from dba_profiles WHERE profile = account_profile
+        Oracle-->>PB: PASSWORD_ROLLOVER_TIME and password limits
+        PB->>PB: Assert PASSWORD_ROLLOVER_TIME >= min_rollover_time_days
+        PB->>PB: Assert no rollover already in progress
+    end
+
+    rect rgb(230, 255, 255)
+        Note over PB,Oracle: Phase 6 — Session and RMAN Gate
+        PB->>Oracle: SELECT from gv$session WHERE username = target_user
+        Oracle-->>PB: Active session count
+        PB->>Oracle: SELECT from v$rman_backup_job_details WHERE status = 'RUNNING'
+        Oracle-->>PB: RMAN job count
+        PB->>PB: Warn if sessions > threshold; fail if RMAN running
+    end
+
+    rect rgb(255, 255, 220)
+        Note over PB,ExaCC: Phase 7 — Evaluate Rotation
+        PB->>PB: secret_age_days >= password_max_age_days -> set rotation_required
+        alt rotation_required == true
+            PB->>ExaCC: Write break-glass file (chmod 0600, root-owned)
+        end
+    end
+
+    opt rotation_required == true
+
+        rect rgb(255, 220, 180)
+            Note over PB,ExaCC: Phase 8 — Rotate
+            alt dg_detected and target_user == SYS
+                PB->>ExaCC: dbaascli changePassword --user SYS --prepareStandbyBlob
+            else non-DG or non-SYS
+                PB->>ExaCC: dbaascli changePassword --user {target_user}
+            end
+            PB->>Vault: POST /role/{vault_role_name} with new credential
+            Vault-->>PB: 200 OK
+        end
+
+        opt dg_detected == true
+            rect rgb(220, 220, 255)
+                Note over PB,DG: Phase 9 — Data Guard Propagation
+                alt target_user == SYS
+                    PB->>ExaCC: SCP blob to each standby
+                    loop Each standby
+                        PB->>DG: dbaascli changePassword --standbyBlobFromPrimary
+                    end
+                    PB->>ExaCC: Delete blob (primary + all standbys)
+                else non-SYS
+                    loop Each standby
+                        PB->>DG: dbaascli changePassword --user {target_user}
+                    end
+                end
+                loop Each standby role
+                    PB->>Vault: POST /role/{target_user}_{standby}_EXACC
+                    Vault-->>PB: 200 OK
+                end
+            end
+        end
+
+        rect rgb(200, 240, 200)
+            Note over PB,Vault: Phase 11 — Post-Validation
+            PB->>Oracle: CONNECT {target_user}/"$new_cred"[ as sysdba if SYS]
+            Oracle-->>PB: CONNECTION_OK; account_status not LOCKED
+            PB->>Vault: GET /role/{vault_role_name}
+            Vault-->>PB: current_version > pre-rotation baseline
+            PB->>ExaCC: Delete break-glass backup file
+        end
+
+    end
+
+    rect rgb(220, 220, 220)
+        Note over PB: Phase 12 — Record Result
+        PB->>PB: set_fact rotation_summary -> localhost (ROTATED or SKIPPED)
+    end
+{mermaid}
+
+{note:title=Mermaid Plugin Required}
+The diagram above requires the *Mermaid Diagrams for Confluence* app (Atlassian Marketplace). If the plugin is not installed, change the opening {{{{mermaid}}}} tag to {{{{code:language=mermaid}}}} and the closing tag accordingly — it will render as a syntax-highlighted code block.
+{note}
+
+----
+
+h2. Error Handling
+
+All phases run inside a {{block/rescue}} in {{tasks/main.yml}}. If any phase fails:
+
+# The rescue block captures {{ansible_failed_task.name}} and {{ansible_failed_result.msg}}
+# The failure is recorded to {{hostvars['localhost']['rotation_failures']}} via {{delegate_facts: true}}
+# The host is explicitly re-failed so it registers against {{max_fail_percentage}} in the driving playbook
+# All other databases in the estate continue unaffected (unless {{max_fail_percentage}} is breached)
+
+{warning:title=Break-glass retention on failure}
+The break-glass backup file is *only deleted on confirmed success* (Phase 11). If the role fails after Phase 8 — meaning the credential was changed in Oracle but the Vault write failed — the break-glass file intentionally remains on the target host at {{breakglass_backup_path}} for manual recovery. The file contains the old credential and is {{chmod 0600}}, root-owned.
+{warning}
+
+----
+
+h2. Connection Model
+
+|| Layer || Account || Method || Credential ||
+| SSH login | {{ans_oracle}} | OTP via Vault | {{lookup('_client_.epe.ssh_otp', ansible_host, ...)}} |
+| become (admin tasks) | {{root}} | {{ansible.builtin.su}} | OTP via Vault |
+| become (sqlplus tasks) | {{oracle}} | {{ansible.builtin.su}} | OTP via Vault |
+
+Oracle OS authentication ({{/ as sysdba}}) is used for account-status, profile, session, and RMAN queries — no TNS listener is required for these reads.
+
+Credential validation (Phase 3) and post-rotation connectivity (Phase 11) connect as {{target_user}} directly via sqlplus using the Vault-supplied credential. The per-database environment file ({{/home/oracle/<db_unique_name>.env}}) is sourced before every sqlplus call to set {{ORACLE_SID}} and {{ORACLE_HOME}}.
+
+SSH ControlMaster ({{ControlPersist=60s}}, configured in {{ansible.cfg}}) reduces OTP lookups on clusters with multiple databases — one OTP per physical host per play, not one per database.
+
+----
+
+h2. Related Pages
+
+* [Oracle SYS Password Rotation — Playbook Reference|Oracle SYS Password Rotation Playbook]
+* [Vault Static Database Secrets Engine — Configuration]
+* [ExaCC OTP SSH Authentication — Overview]
+* [Oracle PASSWORD_ROLLOVER_TIME — Configuration Guide]

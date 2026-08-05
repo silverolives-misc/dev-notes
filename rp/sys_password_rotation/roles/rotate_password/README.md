@@ -194,7 +194,7 @@ sequenceDiagram
         Note over PB,Vault: Phase 1 — Vault Pre-check
         PB->>Vault: GET /role/{vault_role_name}
         Vault-->>PB: created_at, current_version (pre-rotation baseline)
-        PB->>PB: Assert hostvars present; assert age ≥ min_age_days
+        PB->>PB: Assert hostvars present, assert age ≥ min_age_days
     end
 
     rect rgb(230, 255, 230)
@@ -217,7 +217,7 @@ sequenceDiagram
             Note over PB,Oracle: Phase 4 — Data Guard Pre-check
             PB->>Oracle: SELECT lag from v$dataguard_stats
             Oracle-->>PB: Apply lag in seconds
-            PB->>PB: Assert lag ≤ dg_max_lag_seconds; assert no gap sequences
+            PB->>PB: Assert lag ≤ dg_max_lag_seconds, assert no gap sequences
         end
     end
 
@@ -234,7 +234,7 @@ sequenceDiagram
         Oracle-->>PB: Active session count
         PB->>Oracle: SELECT from v$rman_backup_job_details WHERE status = 'RUNNING'
         Oracle-->>PB: RMAN job count
-        PB->>PB: Warn if sessions > threshold; fail if RMAN running
+        PB->>PB: Warn if sessions > threshold, fail if RMAN running
     end
 
     rect rgb(255, 255, 220)
@@ -290,7 +290,7 @@ sequenceDiagram
         rect rgb(200, 240, 200)
             Note over PB,Vault: Phase 11 — Post-Validation
             PB->>Oracle: sqlplus CONNECT {target_user}/"$new_cred"[ as sysdba if SYS]
-            Oracle-->>PB: CONNECTION_OK; account_status = OPEN (not LOCKED)
+            Oracle-->>PB: CONNECTION_OK, account_status = OPEN (not LOCKED)
             PB->>Vault: GET /role/{vault_role_name}
             Vault-->>PB: current_version (assert > pre-rotation baseline)
             PB->>ExaCC: Delete break-glass backup file
