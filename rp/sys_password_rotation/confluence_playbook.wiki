@@ -1,8 +1,8 @@
-h1. Oracle SYS Password Rotation — Playbook Reference
+h1. Oracle SYS Password Rotation  -  Playbook Reference
 
 {panel:title=At a Glance|borderColor=#0B7A75|titleBGColor=#E6F4F3|borderWidth=2}
 *Playbook:* {{sys_password_rotation/main.yml}}
-*Role:* {{rotate_password}}  (generic — always called with {{target_user: "SYS"}} by this playbook)
+*Role:* {{rotate_password}}  (generic  -  always called with {{target_user: "SYS"}} by this playbook)
 *Vault engine:* Custom static database secrets engine ({{vault-plugin-static-database}})
 *Scope:* Automated SYS password rotation across an ExaCC estate
 {panel}
@@ -14,20 +14,20 @@ h2. Objective
 Discovers which Oracle SYS credentials in HashiCorp Vault are overdue for rotation, confirms live Data Guard topology before touching anything, rotates only confirmed PRIMARY databases, and publishes a structured end-of-run report to AAP Artifacts.
 
 *Key design principles:*
-* Standbys are explicitly excluded at Phase 1.5 — the live topology check — so no serial setting can accidentally rotate a standby
+* Standbys are explicitly excluded at Phase 1.5  -  the live topology check  -  so no serial setting can accidentally rotate a standby
 * SYS password propagation to DG standbys uses the native ExaCC blob mechanism ({{--prepareStandbyBlob}} / {{--standbyBlobFromPrimary}})
 * All Vault API calls in Phase 1 are bounded by {{vault_api_concurrency}} to protect the Vault cluster
-* Each rotation attempt runs inside a {{block/rescue}} in the role — failure on one database does not abort the estate
+* Each rotation attempt runs inside a {{block/rescue}} in the role  -  failure on one database does not abort the estate
 
 ----
 
 h2. Architecture
 
 || Phase || Hosts || What happens ||
-| *Phase 1* | localhost | Vault auth → list all {{SYS_*_EXACC}} roles → parallel metadata reads (throttled) → fetch credentials for overdue candidates → build {{_verify_candidates}} in-memory inventory |
+| *Phase 1* | localhost | Vault auth -> list all {{SYS_*_EXACC}} roles -> parallel metadata reads (throttled) -> fetch credentials for overdue candidates -> build {{_verify_candidates}} in-memory inventory |
 | *Phase 1.5* | _verify_candidates | Live {{dbaascli database getDetails}} on every overdue candidate. Confirm PRIMARY vs STANDBY. Only confirmed PRIMARYs enter {{rotation_targets}}. |
 | *Phase 2* | rotation_targets | Execute {{rotate_password}} role (serial, DG-safe). Role performs 11 phases from Vault pre-check through post-validation. |
-| *Phase 3* | localhost | Aggregate {{rotation_summary}} and {{rotation_failures}} from localhost hostvars → {{set_stats}} → AAP Artifacts report |
+| *Phase 3* | localhost | Aggregate {{rotation_summary}} and {{rotation_failures}} from localhost hostvars -> {{set_stats}} -> AAP Artifacts report |
 
 {info:title=Job Slicing must be 1}
 Do *not* slice this job. Slicing creates independent child jobs, each with its own isolated hostvars state. The {{delegate_facts: true}} aggregation pattern used across plays produces N incomplete summaries instead of one consolidated report. Control parallelism with {{rotation_serial}} and {{forks}} instead.
@@ -72,9 +72,9 @@ h3. Extra Variables
 | {{target_user}} | {{SYS}} | Oracle account to rotate. Always passed as {{SYS}} by this playbook; the role is generic. |
 | {{password_max_age_days}} | {{90}} | Rotate if credential age exceeds this threshold (days) |
 | {{password_min_age_days}} | {{1}} | Skip if credential was rotated more recently than this (guards against double-rotation) |
-| {{rotation_serial}} | {{1}} | Phase 2 parallelism — integer or percentage (e.g. {{"10%"}}) |
+| {{rotation_serial}} | {{1}} | Phase 2 parallelism  -  integer or percentage (e.g. {{"10%"}}) |
 | {{rotation_max_fail_pct}} | {{100}} | Abort Phase 2 if this percentage of hosts fail |
-| {{verify_serial}} | {{10}} | Phase 1.5 parallelism — concurrent dbaascli topology checks |
+| {{verify_serial}} | {{10}} | Phase 1.5 parallelism  -  concurrent dbaascli topology checks |
 | {{vault_api_concurrency}} | {{25}} | Max simultaneous Vault API calls during Phase 1 discovery |
 | {{vault_engine_mount}} | {{secrets/static-database}} | Vault engine mount point |
 | {{environment}} | {{prod}} | Stamped on host records for reporting |
@@ -130,7 +130,7 @@ A {{rotation_report}} dict is published at the end of the run and captured autom
 || Key || Meaning ||
 | {{rotated}} | Databases where the credential was changed this run |
 | {{skipped}} | Databases not yet due ({{secret_age < password_max_age_days}}) |
-| {{failed}} | Databases where the role execution failed — includes {{failed_task}} name and {{error}} message |
+| {{failed}} | Databases where the role execution failed  -  includes {{failed_task}} name and {{error}} message |
 | {{excluded}} | Databases that did not pass Phase 1.5 verification (STANDBY, UNKNOWN, or unreachable) |
 
 h3. Console Summary
@@ -141,7 +141,7 @@ Printed at the end of every run:
 ROTATED  : 12
 SKIPPED  :  3
 FAILED   :  0
-EXCLUDED :  2  (Phase 1.5 — not PRIMARY or unreachable)
+EXCLUDED :  2  (Phase 1.5  -  not PRIMARY or unreachable)
 {code}
 
 ----
@@ -157,8 +157,8 @@ sequenceDiagram
     participant Oracle as Oracle DB (sqlplus)
 
     rect rgb(230, 240, 255)
-        Note over AAP,Vault: Phase 1 — Discovery (localhost)
-        AAP->>Vault: Authenticate — custom login plugin (TTL=6h)
+        Note over AAP,Vault: Phase 1  -  Discovery (localhost)
+        AAP->>Vault: Authenticate  -  custom login plugin (TTL=6h)
         Vault-->>AAP: login_token
         AAP->>Vault: GET /role?list=true
         Vault-->>AAP: All role names
@@ -171,7 +171,7 @@ sequenceDiagram
     end
 
     rect rgb(230, 255, 230)
-        Note over AAP,ExaCC: Phase 1.5 — Live Topology Verification
+        Note over AAP,ExaCC: Phase 1.5  -  Live Topology Verification
         loop Each candidate (serial: verify_serial)
             AAP->>Vault: OTP SSH lookup (ans_oracle + oracle)
             AAP->>ExaCC: SSH -> dbaascli database getDetails --dbname
@@ -185,7 +185,7 @@ sequenceDiagram
     end
 
     rect rgb(255, 245, 230)
-        Note over AAP,Oracle: Phase 2 — Rotation (serial: rotation_serial)
+        Note over AAP,Oracle: Phase 2  -  Rotation (serial: rotation_serial)
         loop Each confirmed PRIMARY
             AAP->>Vault: OTP SSH lookup (ans_oracle + oracle)
             AAP->>ExaCC: SSH -> rotate_password role (11 phases)
@@ -202,7 +202,7 @@ sequenceDiagram
     end
 
     rect rgb(245, 230, 255)
-        Note over AAP: Phase 3 — Summary (localhost)
+        Note over AAP: Phase 3  -  Summary (localhost)
         AAP->>AAP: Aggregate rotation_summary + rotation_failures
         AAP->>AAP: set_stats -> rotation_report (AAP Artifacts)
         AAP->>AAP: Print ROTATED / SKIPPED / FAILED / EXCLUDED totals
@@ -210,7 +210,7 @@ sequenceDiagram
 {mermaid}
 
 {note:title=Mermaid Plugin Required}
-The diagram above requires the *Mermaid Diagrams for Confluence* app (Atlassian Marketplace). If the plugin is not installed, change the opening {{{{mermaid}}}} tag to {{{{code:language=mermaid}}}} and the closing tag accordingly — it will render as a syntax-highlighted code block.
+The diagram above requires the *Mermaid Diagrams for Confluence* app (Atlassian Marketplace). If the plugin is not installed, change the opening {{{{mermaid}}}} tag to {{{{code:language=mermaid}}}} and the closing tag accordingly  -  it will render as a syntax-highlighted code block.
 {note}
 
 ----
@@ -222,7 +222,7 @@ h3. AAP Job Template Settings
 || Setting || Value ||
 | Playbook | {{sys_password_rotation/main.yml}} |
 | Forks | {{20}} (scale to estate size) |
-| Job Slicing | *1* — do not slice |
+| Job Slicing | *1*  -  do not slice |
 
 h3. Extra Variables in AAP (JSON format)
 
@@ -241,7 +241,7 @@ h3. CLI Examples
 ansible-playbook sys_password_rotation/main.yml -e environment=prod
 {code}
 
-{code:language=bash|title=Large estate — 10% parallelism, 20 forks}
+{code:language=bash|title=Large estate  -  10% parallelism, 20 forks}
 ansible-playbook sys_password_rotation/main.yml -e environment=prod -e rotation_serial="10%" -f 20
 {code}
 
@@ -264,15 +264,15 @@ h2. Security Notes
 * If rotation fails after Phase 8 (credential changed in Oracle but Vault write failed), the break-glass file intentionally remains for manual recovery
 {warning}
 
-* Standbys are excluded at Phase 1.5 — the {{rotation_serial}} value cannot inadvertently reach a standby node
+* Standbys are excluded at Phase 1.5  -  the {{rotation_serial}} value cannot inadvertently reach a standby node
 * OTP SSH credentials are session-scoped (no reuse) and fetched per-batch immediately before the SSH connection is opened
-* SSH ControlMaster ({{ControlPersist=60s}}) reduces OTP lookups on clusters with multiple databases — one OTP per physical host, not one per database
+* SSH ControlMaster ({{ControlPersist=60s}}) reduces OTP lookups on clusters with multiple databases  -  one OTP per physical host, not one per database
 
 ----
 
 h2. Related Pages
 
-* [rotate_password — Ansible Role Reference|rotate_password Ansible Role]
-* [Vault Static Database Secrets Engine — Configuration]
-* [ExaCC OTP SSH Authentication — Overview]
-* [generate_oracle_static_role_tfvars — Provisioning Vault Roles]
+* [rotate_password  -  Ansible Role Reference|rotate_password Ansible Role]
+* [Vault Static Database Secrets Engine  -  Configuration]
+* [ExaCC OTP SSH Authentication  -  Overview]
+* [generate_oracle_static_role_tfvars  -  Provisioning Vault Roles]
