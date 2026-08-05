@@ -4,7 +4,7 @@
 # Validate connectivity to the custom Vault static database engine and confirm
 # the role exists with the expected structure.
 #
-# current_sys_password and secret_age_days are supplied as hostvars by the
+# current_oracle_password and secret_age_days are supplied as hostvars by the
 # playbook (sourced from the role metadata GET in Phase 1).
 #
 # The pre-rotation GET captures created_at and current_version so
@@ -14,14 +14,14 @@
 - name: "Vault Pre-check | Assert credential hostvars were supplied by playbook"
   ansible.builtin.assert:
     that:
-      - current_sys_password is defined
-      - current_sys_password | length > 0
+      - current_oracle_password is defined
+      - current_oracle_password | length > 0
       - secret_age_days is defined
       - login_token is defined
       - login_token | length > 0
       - vault_role_name is defined
     fail_msg: >
-      One or more required Vault hostvars are missing (current_sys_password,
+      One or more required Vault hostvars are missing (current_oracle_password,
       secret_age_days, login_token, vault_role_name).
       Ensure Phase 1 of the playbook completed successfully.
     success_msg: "Vault credential hostvars confirmed present."

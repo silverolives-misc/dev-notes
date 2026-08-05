@@ -1,0 +1,208 @@
+---
+# ------------------------------------------------------------------------------
+# action_dataguard.yml
+# Post-rotation actions for Data Guard environments.
+#
+# SYS: propagates password via dbaascli blob (ExaCC native mechanism).
+# Other users: runs dbaascli changePassword directly on each standby node.
+#
+# Vault is updated for each standby role regardless of path.
+# Runs only when dg_detected=true and rotation_required=true.
+# ------------------------------------------------------------------------------
+
+- name: "DG Action | Display standby members to be updated"
+  ansible.builtin.debug:
+    msg:
+      - "Data Guard rotation propagation required."
+      - "Target user    : {{ target_user }}"
+      - "Standby members: {{ dg_standby_members | map(attribute=0) | list }}"
+      - "Method         : {{ 'blob propagation (SYS)' if target_user | upper == 'SYS' else 'direct changePassword (non-SYS)' }}"
+
+# ==============================================================================
+# SYS path — blob-based propagation (ExaCC native mechanism)
+# ==============================================================================
+
+- name: "DG Action | Verify blob file was created on primary node"
+  ansible.builtin.stat:
+    path: "/tmp/{{ db_unique_name }}_{{ target_user | lower }}_blob_{{ ansible_date_time.date }}"
+  register: blob_stat
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+  when: target_user | upper == 'SYS'
+
+- name: "DG Action | Assert blob file exists"
+  ansible.builtin.assert:
+    that:
+      - blob_stat.stat.exists
+    fail_msg: >
+      Standby blob file not found at
+      /tmp/{{ db_unique_name }}_{{ target_user | lower }}_blob_{{ ansible_date_time.date }}.
+      dbaascli may not have created it. Check dbaascli output.
+    success_msg: "Standby blob file confirmed present."
+  when: target_user | upper == 'SYS'
+
+- name: "DG Action | Copy blob file to each standby node"
+  ansible.builtin.shell: |
+    scp -o StrictHostKeyChecking=no \
+      /tmp/{{ db_unique_name }}_{{ target_user | lower }}_blob_{{ ansible_date_time.date }} \
+      oracle@{{ item[0] }}:/tmp/{{ db_unique_name }}_{{ target_user | lower }}_blob_{{ ansible_date_time.date }}
+  loop: "{{ dg_standby_members }}"
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: oracle
+  register: blob_copy_result
+  failed_when: blob_copy_result.rc != 0
+  no_log: true
+  vars:
+    ansible_become_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
+        login_token=hostvars[inventory_hostname]['login_token'],
+        ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
+        account='oracle') }}"
+  when: target_user | upper == 'SYS'
+
+- name: "DG Action | Set correct ownership of blob on each standby"
+  ansible.builtin.shell: |
+    chown oracle:oinstall /tmp/{{ db_unique_name }}_{{ target_user | lower }}_blob_{{ ansible_date_time.date }}
+  loop: "{{ dg_standby_members }}"
+  delegate_to: "{{ item[0] }}"
+  become: true
+  become_user: root
+  when: target_user | upper == 'SYS'
+
+- name: "DG Action | Apply SYS password change on each standby via blob"
+  ansible.builtin.shell: |
+    {{ dbaascli_path }} database changePassword \
+      --dbname {{ oracle_db_name | default(db_unique_name) }} \
+      --user {{ target_user }} \
+      --standbyBlobFromPrimary /tmp/{{ db_unique_name }}_{{ target_user | lower }}_blob_{{ ansible_date_time.date }}
+  register: standby_blob_result
+  loop: "{{ dg_standby_members }}"
+  delegate_to: "{{ item[0] }}"
+  become: true
+  become_user: root
+  no_log: true
+  changed_when: standby_blob_result.rc == 0
+  failed_when: standby_blob_result.rc != 0
+  when: target_user | upper == 'SYS'
+
+- name: "DG Action | Assert standby blob propagation succeeded" # noqa: no-log-password
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+    fail_msg: >
+      dbaascli blob password update failed on
+      {{ dg_standby_members[idx][0] }} (RC={{ item.rc }}).
+      Manual intervention required to synchronise standby credential.
+    success_msg: "Standby credential updated on {{ dg_standby_members[idx][0] }}."
+  loop: "{{ standby_blob_result.results }}"
+  loop_control:
+    index_var: idx
+  when: target_user | upper == 'SYS'
+
+- name: "DG Action | Clean up blob files from primary"
+  ansible.builtin.file:
+    path: "/tmp/{{ db_unique_name }}_{{ target_user | lower }}_blob_{{ ansible_date_time.date }}"
+    state: absent
+  delegate_to: "{{ node_fqdn }}"
+  become: true
+  become_user: root
+  when: target_user | upper == 'SYS'
+
+- name: "DG Action | Clean up blob files from each standby"
+  ansible.builtin.file:
+    path: "/tmp/{{ db_unique_name }}_{{ target_user | lower }}_blob_{{ ansible_date_time.date }}"
+    state: absent
+  loop: "{{ dg_standby_members }}"
+  delegate_to: "{{ item[0] }}"
+  become: true
+  become_user: root
+  when: target_user | upper == 'SYS'
+
+# ==============================================================================
+# Non-SYS path — direct changePassword on each standby
+# ==============================================================================
+
+- name: "DG Action | Apply {{ target_user }} password change directly on each standby"
+  ansible.builtin.shell:
+    cmd: >-
+      printf '%s\n%s\n' "${DBAAS_NEW_PASS}" "${DBAAS_NEW_PASS}"
+      | {{ dbaascli_path }} database changePassword
+      --dbname {{ oracle_db_name | default(db_unique_name) }}
+      --user {{ target_user }}
+  environment:
+    DBAAS_NEW_PASS: "{{ new_oracle_password }}"
+  register: standby_direct_result
+  loop: "{{ dg_standby_members }}"
+  delegate_to: "{{ item[0] }}"
+  become: true
+  become_user: root
+  no_log: true
+  changed_when: standby_direct_result.rc == 0
+  failed_when: standby_direct_result.rc != 0
+  when: target_user | upper != 'SYS'
+
+- name: "DG Action | Assert direct standby password change succeeded" # noqa: no-log-password
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+    fail_msg: >
+      dbaascli direct password change failed on
+      {{ dg_standby_members[idx][0] }} (RC={{ item.rc }}).
+      Manual intervention required to synchronise standby credential.
+    success_msg: "{{ target_user }} credential updated directly on {{ dg_standby_members[idx][0] }}."
+  loop: "{{ standby_direct_result.results }}"
+  loop_control:
+    index_var: idx
+  when: target_user | upper != 'SYS'
+
+# ==============================================================================
+# Vault update — same for both paths
+# ==============================================================================
+
+- name: "DG Action | Write new credential to Vault for each standby role"
+  ansible.builtin.uri:
+    url:            "{{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ target_user | upper }}_{{ item[0] }}_EXACC"
+    method:         POST
+    headers:
+      X-Vault-Namespace: "{{ vault_namespace }}"
+      X-Vault-Token:     "{{ login_token }}"
+      Content-Type:      application/json
+    body_format: json
+    body:
+      username: "{{ target_user | upper }}"
+      password: "{{ new_oracle_password }}"
+    status_code: [200, 204]
+    return_content: true
+  no_log: true
+  loop: "{{ dg_standby_members }}"
+  loop_control:
+    label: "{{ target_user | upper }}_{{ item[0] }}_EXACC"
+  register: vault_write_standby
+
+- name: "DG Action | Assert Vault writes succeeded for all standbys" # noqa: no-log-password
+  ansible.builtin.assert:
+    that:
+      - item.status in [200, 204]
+    fail_msg: >
+      CRITICAL: Vault write failed for standby role
+      '{{ target_user | upper }}_{{ dg_standby_members[idx][0] }}_EXACC'
+      (HTTP {{ item.status }}).
+      The DB credential was updated but Vault is out of sync.
+      Update manually via:
+      POST {{ vault_engine_url }}/v1/{{ vault_engine_mount }}/role/{{ target_user | upper }}_{{ dg_standby_members[idx][0] }}_EXACC
+    success_msg: >
+      Vault updated for standby role '{{ target_user | upper }}_{{ dg_standby_members[idx][0] }}_EXACC'
+      (HTTP {{ item.status }}).
+  loop: "{{ vault_write_standby.results }}"
+  loop_control:
+    index_var: idx
+
+- name: "DG Action | Display DG rotation summary"
+  ansible.builtin.debug:
+    msg:
+      - "Data Guard rotation complete."
+      - "Target user      : {{ target_user }}"
+      - "Primary updated  : {{ db_unique_name }}"
+      - "Standbys updated : {{ dg_standby_members | map(attribute=0) | list }}"
+      - "Vault roles updated: {{ ([target_user | upper + '_' + db_unique_name + '_EXACC'] + dg_standby_members | map(attribute=0) | map('regex_replace', '^(.*)$', target_user | upper + '_\\1_EXACC') | list) }}"

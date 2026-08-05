@@ -18,9 +18,9 @@
       Next rotation due in ~{{ (password_max_age_days | int - secret_age_days | float) | round(1) }} days.
       {% endif %}
 
-- name: "Evaluate | Generate new SYS password"
+- name: "Evaluate | Generate new {{ target_user }} password"
   ansible.builtin.set_fact:
-    new_sys_password: >-
+    new_oracle_password: >-
       {{
         lookup('community.general.random_string',
           length=password_length | int,
@@ -36,7 +36,7 @@
 - name: "Evaluate | Assert new password is not identical to current password"
   ansible.builtin.assert:
     that:
-      - new_sys_password != current_sys_password
+      - new_oracle_password != current_oracle_password
     fail_msg: "Generated password is identical to the current password. Re-run the playbook."
     success_msg: "New password is distinct from the current password."
   no_log: true
@@ -59,10 +59,11 @@
 - name: "Evaluate | Write break-glass backup of current password"
   ansible.builtin.shell:
     cmd: |
-      cat > "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt" <<'BREAKGLASS'
+      cat > "{{ breakglass_backup_path }}/{{ db_unique_name }}_{{ target_user | lower }}_breakglass_{{ ansible_date_time.date }}.txt" <<'BREAKGLASS'
       # Break-glass password backup
       # Database    : {{ oracle_service | default('') }}
       # DB Unique   : {{ db_unique_name }}
+      # Target User : {{ target_user }}
       # Host        : {{ node_fqdn }}
       # SCAN        : {{ scan_address | default('') }}
       # Timestamp   : {{ ansible_date_time.iso8601 }}
@@ -70,13 +71,13 @@
       # DG Detected : {{ dg_detected | default(false) }}
       # CV Detected : {{ commvault_detected | default(false) }}
       #
-      # This file contains the PREVIOUS SYS password before rotation.
+      # This file contains the PREVIOUS {{ target_user }} password before rotation.
       # Valid until PASSWORD_ROLLOVER_TIME window expires.
       # DELETE this file once rotation is confirmed successful.
       #
-      SYS_PASSWORD={{ current_sys_password }}
+      {{ target_user | upper }}_PASSWORD={{ current_oracle_password }}
       BREAKGLASS
-      chmod 0600 "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
+      chmod 0600 "{{ breakglass_backup_path }}/{{ db_unique_name }}_{{ target_user | lower }}_breakglass_{{ ansible_date_time.date }}.txt"
   no_log: true
   become: true
   become_user: root

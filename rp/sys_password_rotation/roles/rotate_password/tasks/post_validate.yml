@@ -1,24 +1,24 @@
 ---
 # ------------------------------------------------------------------------------
 # post_validate.yml
-# Verify rotation success — connect with new password, confirm Vault updated
+# Verify rotation success — connect with new credential, confirm Vault updated
 # ------------------------------------------------------------------------------
 
 - name: "Post-validate | Pause to allow password change to propagate"
   ansible.builtin.pause:
     seconds: 5
 
-- name: "Post-validate | Test DB connectivity with new password"
+- name: "Post-validate | Test DB connectivity with new {{ target_user }} credential"
   ansible.builtin.shell: |
     {{ oracle_env }}
     sqlplus -s /nolog <<EOF
     {{ sqlplus_preamble }}
-    CONNECT sys/"$SQLPLUS_CONN" as sysdba
+    CONNECT {{ target_user | lower }}/"$SQLPLUS_CONN"{{ ' as sysdba' if target_user | upper == 'SYS' else '' }}
     SELECT 'CONNECTION_OK' FROM dual;
     EXIT;
     EOF
   environment:
-    SQLPLUS_CONN: "{{ new_sys_password }}"
+    SQLPLUS_CONN: "{{ new_oracle_password }}"
   register: post_connect_check
   delegate_to: "{{ node_fqdn }}"
   become: true
@@ -32,28 +32,28 @@
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
         account='oracle') }}"
 
-- name: "Post-validate | Assert new password works" # noqa: no-log-password
+- name: "Post-validate | Assert new {{ target_user }} credential works" # noqa: no-log-password
   ansible.builtin.assert:
     that:
       - post_connect_check.rc == 0
       - "'CONNECTION_OK' in post_connect_check.stdout"
     fail_msg: >
-      CRITICAL: Cannot connect with new password (RC={{ post_connect_check.rc }}).
-      Old password still valid within rollover window.
+      CRITICAL: Cannot connect with new {{ target_user }} credential (RC={{ post_connect_check.rc }}).
+      Old credential still valid within rollover window.
       Check break-glass backup at {{ breakglass_backup_path }}.
-    success_msg: "Successfully connected with new password."
+    success_msg: "Successfully connected with new {{ target_user }} credential."
 
-- name: "Post-validate | Query SYS account status with new password"
+- name: "Post-validate | Query {{ target_user }} account status with new credential"
   ansible.builtin.shell: |
     {{ oracle_env }}
     sqlplus -s /nolog <<EOF
     {{ sqlplus_preamble }}
-    CONNECT sys/"$SQLPLUS_CONN" as sysdba
-    SELECT account_status FROM dba_users WHERE username = 'SYS';
+    CONNECT {{ target_user | lower }}/"$SQLPLUS_CONN"{{ ' as sysdba' if target_user | upper == 'SYS' else '' }}
+    SELECT account_status FROM dba_users WHERE username = '{{ target_user | upper }}';
     EXIT;
     EOF
   environment:
-    SQLPLUS_CONN: "{{ new_sys_password }}"
+    SQLPLUS_CONN: "{{ new_oracle_password }}"
   register: post_status_raw
   delegate_to: "{{ node_fqdn }}"
   become: true
@@ -66,18 +66,18 @@
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
         account='oracle') }}"
 
-- name: "Post-validate | Assert SYS account is still healthy"
+- name: "Post-validate | Assert {{ target_user }} account is still healthy"
   ansible.builtin.assert:
     that:
       - "'LOCKED' not in post_status_raw.stdout"
     fail_msg: >
-      SYS account is locked post-rotation: {{ post_status_raw.stdout | trim }}.
-    success_msg: "SYS account status post-rotation: {{ post_status_raw.stdout | trim }}."
+      {{ target_user }} account is locked post-rotation: {{ post_status_raw.stdout | trim }}.
+    success_msg: "{{ target_user }} account status post-rotation: {{ post_status_raw.stdout | trim }}."
 
 # ------------------------------------------------------------------------------
 # Read the role back from the custom static engine and confirm that
 # current_version has incremented beyond vault_pre_rotation_version captured
-# in precheck_vault.yml, confirming the password write was accepted.
+# in precheck_vault.yml, confirming the credential write was accepted.
 # ------------------------------------------------------------------------------
 
 - name: "Post-validate | GET role from Vault custom static engine"
@@ -103,7 +103,7 @@
       Vault current_version did not increment after rotation.
       Pre-rotation: {{ vault_pre_rotation_version }},
       post-rotation: {{ vault_post_role.json.data.current_version | default('absent') }}.
-      The password may not have been written to the engine successfully.
+      The credential may not have been written to the engine successfully.
     success_msg: >
       Vault rotation confirmed: version incremented from
       {{ vault_pre_rotation_version }} to
@@ -111,7 +111,7 @@
 
 - name: "Post-validate | Remove break-glass backup after confirmed success"
   ansible.builtin.file:
-    path: "{{ breakglass_backup_path }}/{{ db_unique_name }}_sys_breakglass_{{ ansible_date_time.date }}.txt"
+    path: "{{ breakglass_backup_path }}/{{ db_unique_name }}_{{ target_user | lower }}_breakglass_{{ ansible_date_time.date }}.txt"
     state: absent
   become: true
   become_user: root
@@ -122,7 +122,7 @@
   ansible.builtin.debug:
     msg:
       - "============================================="
-      - " SYS Password Rotation Complete"
+      - " {{ target_user }} Credential Rotation Complete"
       - "============================================="
       - "Database        : {{ oracle_service }}"
       - "DB Unique Name  : {{ db_unique_name }}"
@@ -140,5 +140,5 @@
       - "Rotated By      : {{ ansible_user_id }}"
       - "============================================="
       - "{% if commvault_detected | default(false) and commvault_ora_user | upper == target_user | upper %}ACTION: Update Commvault credentials — see {{ commvault_notification_log }}{% endif %}"
-      - "{% if dg_detected | default(false) %}DG standbys updated via dbaascli blob propagation{% endif %}"
+      - "{% if dg_detected | default(false) and target_user | upper == 'SYS' %}DG standbys updated via dbaascli blob propagation{% elif dg_detected | default(false) %}DG standbys updated via direct dbaascli changePassword{% endif %}"
       - "============================================="

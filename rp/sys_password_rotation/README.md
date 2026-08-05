@@ -1,179 +1,227 @@
-# sys_password_rotation
+# Oracle Password Rotation Playbook
 
-Ansible role for automated SYS password rotation on Oracle ExaCC databases.
+## Objective
 
-Vault KV2 drives the process end-to-end — Ansible reads the estate from Vault,
-builds an in-memory inventory, and rotates any database whose secret has exceeded
-the configured age threshold. Topology (Data Guard, Commvault) is auto-detected
-and appropriate actions taken for each.
+Automates rotation of Oracle `SYS` passwords across an ExaCC estate (the primary use case). Password state is managed exclusively through a custom HashiCorp Vault static database secrets engine using the `SYS_<DB_UNIQUE_NAME>_EXACC` role naming convention. The playbook discovers which databases are overdue for rotation, confirms live topology before touching anything, rotates only confirmed PRIMARY databases, and publishes a structured end-of-run report to AAP Artifacts.
+
+The `rotate_password` role that drives Phase 2 is generic — it defaults to `SYS` but can rotate any Oracle account by passing `target_user`. This playbook always passes `target_user: "SYS"` explicitly.
+
+Standbys are never rotated directly — for SYS, Data Guard propagates the change from the primary via a blob file; for other users, the role connects to each standby directly.
 
 ---
 
-## Role Structure
+## Architecture
+
+The playbook is structured in three phases plus a summary play, all running in the same job execution.
 
 ```
-sys_password_rotation/
-├── defaults/main.yml              # All configurable variables
-├── vars/main.yml                  # Internal variables (sqlplus preamble etc)
-├── meta/main.yml                  # Role metadata and dependencies
-├── tasks/
-│   ├── main.yml                   # Entry point — ordered phase execution
-│   ├── precheck_vault.yml         # Vault connectivity, metadata, secret age
-│   ├── detect_topology.yml        # Auto-detect Data Guard and Commvault
-│   ├── precheck_oracle.yml        # RAC instances, DB role, PDBs, SYS account
-│   ├── precheck_dataguard.yml     # DG errors, lag, MRP (when DG detected)
-│   ├── precheck_password_policy.yml  # Profile limits, rollover time, complexity
-│   ├── precheck_sessions.yml      # SYS sessions, RMAN jobs, dbaascli check
-│   ├── evaluate_rotation.yml      # Decide, generate password, break-glass
-│   ├── rotate.yml                 # dbaascli password change + Vault PRIMARY write
-│   ├── action_dataguard.yml       # Blob propagation to standbys + Vault writes
-│   ├── action_commvault.yml       # Commvault notification or credential update
-│   └── post_validate.yml          # Connect with new password, verify Vault
-└── rotate_sys_password.yml        # Example Vault-driven playbook
+Phase 1  (localhost)      — Vault discovery: build in-memory inventory of overdue candidates
+Phase 1.5 (_verify_candidates) — Live dbaascli topology check: confirm PRIMARY vs STANDBY
+Phase 2  (rotation_targets)    — Execute rotate_password role (serial, DG-safe)
+Phase 3  (localhost)      — Aggregate and publish end-of-run report
 ```
 
 ---
 
-## Execution Phases
+## Prerequisites
 
-```
-Phase 1  — Vault pre-checks         (connectivity, age, readable)
-Phase 2  — Topology detection       (Data Guard, Commvault)
-Phase 3  — Oracle DB pre-checks     (RAC instances, role, PDBs, SYS account)
-Phase 4  — Data Guard pre-checks    (DG errors, lag, MRP) [if detected]
-Phase 5  — Password policy checks   (rollover time, complexity, no mid-rollover)
-Phase 6  — Session/backup checks    (SYS sessions, RMAN, dbaascli available)
-Phase 7  — Evaluate rotation        (needed? generate password, break-glass)
-Phase 8  — Rotate                   (dbaascli, Vault write PRIMARY)
-Phase 9  — DG post-rotation         (blob to standbys, Vault write per member)
-Phase 10 — Commvault post-rotation  (notify or update credentials)
-Phase 11 — Post-validation          (connect new password, Vault version check)
-```
+### Environment Variables (set on the AAP execution environment or job template)
 
----
+| Variable | Description |
+|---|---|
+| `_CLIENT__HASHI_URL` | HashiCorp Vault base URL (e.g. `https://vault.example.com:8200`) |
+| `_CLIENT__HASHI_NAMESPACE` | Vault namespace (X-Vault-Namespace header value) |
+| `_CLIENT__HASHI_ROLE` | Vault role name used for OTP SSH authentication |
 
-## Topology Detection
+### Vault Requirements
 
-### Data Guard
-Detected by querying (any one is sufficient):
-- `v$dataguard_config` — DG broker member list
-- `v$parameter` — `dg_broker_start`, `log_archive_config`, `log_archive_dest_2`
-- `v$standby_log` — standby redo logs present
+- Custom static database secrets engine mounted at `secrets/static-database`
+- Roles named `SYS_<DB_UNIQUE_NAME>_EXACC` (uppercase)
+- `/role/{name}` endpoint returns: `username`, `created_at`, `current_version`
+- `/cred/{name}` endpoint returns: `password`, `connection_url` (comma-separated ExaCC node FQDNs)
 
-**Action when detected:**
-- `dbaascli` called with `--prepareStandbyBlob` on the primary
-- Blob file SCP'd to each standby node
-- `dbaascli --standbyBlobFromPrimary` applied on each standby
-- Vault KV2 updated for **each** DG member (primary + all standbys)
-- Blob files cleaned up on all nodes
+### Target Host Requirements
 
-### Commvault
-Detected by any of:
-- `/etc/CommVaultRegistry` directory exists
-- `cvd` process is running
-- `/usr/bin/simpana` binary exists
-- SBT_TAPE RMAN backup jobs found in last 30 days
-
-**Action when detected (commvault_notify_only: true — default):**
-- Detailed notice written to `commvault_notification_log`
-- DBA/Commvault admin must update credentials in CommCell Console
-- Last SBT backup status logged for reference
-
-**Action when detected (commvault_notify_only: false):**
-- Commvault service restarted via simpana
-- Notice still written — manual credential update in CommCell still required
-- Last SBT backup status logged
-
-> **Note:** Full automated credential update in CommCell requires either the
-> Commvault REST API or qcommand CLI, which are environment-specific.
-> The role provides the notification scaffolding and restart hook as a starting
-> point. Extend `action_commvault.yml` with your CommCell API details.
+- `ans_oracle` SSH account with OTP auth via Vault
+- `dbaascli` present at `/bin/dbaascli`
+- Per-database environment files at `/home/oracle/<db_unique_name>.env`
+- `breakglass_backup_path` directory writable by root (default `/etc/oracle/breakglass`)
 
 ---
 
-## Vault Payload (per database)
+## Inputs
+
+### Extra Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `target_user` | `SYS` | Oracle account to rotate |
+| `password_max_age_days` | `90` | Rotate if credential age exceeds this threshold (days) |
+| `password_min_age_days` | `1` | Skip if credential was rotated more recently than this |
+| `rotation_serial` | `1` | Phase 2 parallelism — integer or percentage (`"10%"`) |
+| `rotation_max_fail_pct` | `100` | Stop Phase 2 if this percentage of hosts fail |
+| `verify_serial` | `10` | Phase 1.5 parallelism — dbaascli checks per batch |
+| `vault_api_concurrency` | `25` | Max simultaneous Vault API calls during Phase 1 |
+| `vault_engine_mount` | `secrets/static-database` | Vault engine mount point |
+| `environment` | `prod` | Stamped on host records for reporting |
+
+### Vault Role Name Convention
+
+```
+SYS_<DB_UNIQUE_NAME>_EXACC
+```
+
+The playbook filters all roles matching `^SYS_.*_EXACC$`. The `rotate_password` role is called with `target_user: "SYS"` explicitly.
+
+---
+
+## Outputs
+
+### AAP Artifacts (set_stats)
+
+A `rotation_report` dict is published at the end of the run and captured automatically by AAP as a job artifact:
 
 ```json
 {
-  "password": "...",
-  "db_unique_name": "FINDB_PRIMARY",
-  "db_role": "PRIMARY",
-  "node_fqdn": "exacc-node1.example.com",
-  "scan_address": "findb-scan.example.com",
-  "oracle_version": "19.30.0.0.0",
-  "rotated_by": "ansible-automation",
-  "rotated_at": "2026-05-11T13:00:00Z"
+  "rotation_report": {
+    "run_at": "2026-01-15T09:30:00Z",
+    "target_user": "SYS",
+    "password_max_age_days": 90,
+    "totals": {
+      "rotated": 12,
+      "skipped": 3,
+      "failed": 0,
+      "excluded": 2
+    },
+    "rotated": { "DBNAME1": { "status": "ROTATED", "host": "...", "vault_role": "...", ... } },
+    "skipped": { "DBNAME2": { "status": "SKIPPED", ... } },
+    "failed":  {},
+    "excluded": ["DBNAME3", "DBNAME4"]
+  }
 }
 ```
 
-## Vault Path Convention
+| Key | Meaning |
+|---|---|
+| `rotated` | Databases where the password was changed this run |
+| `skipped` | Databases not yet due for rotation (`secret_age < password_max_age_days`) |
+| `failed` | Databases where the role execution failed (includes failed task name and error) |
+| `excluded` | Databases that did not pass Phase 1.5 verification (STANDBY, UNKNOWN, unreachable) |
+
+### Console Output
+
+A summary line is printed at the end of every run:
 
 ```
-<environment>/exacc/<region>/<db_unique_name>/sys
-
-Examples:
-  prod/exacc/uk-london-1/FINDB_PRIMARY/sys
-  prod/exacc/uk-london-1/FINDB_STANDBY/sys    ← written by action_dataguard
-  nonprod/exacc/uk-london-1/FINDB_DEV/sys
-  dr/exacc/eu-frankfurt-1/FINDB_DR/sys
+ROTATED  : 12
+SKIPPED  : 3
+FAILED   : 0
+EXCLUDED : 2 (Phase 1.5 — not PRIMARY or unreachable)
 ```
 
 ---
 
-## Key Variables
+## Sequence Diagram
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `vault_url` | (required) | Vault server URL |
-| `vault_role_id` | (required) | AppRole role ID |
-| `vault_secret_id` | (required) | AppRole secret ID |
-| `vault_mount_point` | `secret` | KV2 mount point |
-| `oracle_home` | `/u01/app/oracle/product/19.0.0/dbhome_1` | Oracle home path |
-| `oracle_port` | `1521` | Listener port |
-| `password_max_age_days` | `90` | Rotation trigger threshold |
-| `password_min_age_days` | `1` | Minimum age before re-rotation |
-| `password_length` | `20` | Generated password length |
-| `min_rollover_time_days` | `1/24` | Minimum PASSWORD_ROLLOVER_TIME |
-| `fail_on_active_rman` | `true` | Fail if RMAN is running |
-| `dg_enabled` | `false` | Force DG mode (auto-detected normally) |
-| `commvault_enabled` | `false` | Force CV mode (auto-detected normally) |
-| `commvault_notify_only` | `true` | Notify only vs attempt credential update |
-| `breakglass_backup_enabled` | `true` | Store current password before rotation |
-| `dbaascli_path` | `/usr/local/bin/dbaascli` | Path to dbaascli binary |
+```mermaid
+sequenceDiagram
+    autonumber
+    participant AAP as AAP / Controller
+    participant Vault as HashiCorp Vault
+    participant ExaCC as ExaCC Node (dbaascli)
+    participant Oracle as Oracle DB (sqlplus)
 
----
+    rect rgb(230, 240, 255)
+        Note over AAP,Vault: Phase 1 — Discovery (localhost)
+        AAP->>Vault: Authenticate (custom login plugin, TTL=6h)
+        Vault-->>AAP: login_token
+        AAP->>Vault: GET /role?list=true
+        Vault-->>AAP: All role names
+        AAP->>AAP: Filter to SYS_*_EXACC, check age vs threshold
+        AAP->>Vault: GET /role/{name} × N (async, throttled to vault_api_concurrency)
+        Vault-->>AAP: created_at, current_version per role
+        AAP->>Vault: GET /cred/{name} × overdue only (async, throttled)
+        Vault-->>AAP: password, connection_url per overdue role
+        AAP->>AAP: Build _verify_candidates in-memory inventory
+    end
 
-## Requirements
+    rect rgb(230, 255, 230)
+        Note over AAP,ExaCC: Phase 1.5 — Live Topology Verification (_verify_candidates)
+        loop Each candidate (serial: verify_serial)
+            AAP->>Vault: OTP SSH lookup (ans_oracle + root)
+            AAP->>ExaCC: SSH → dbaascli database getDetails --dbname
+            ExaCC-->>AAP: JSON with dbRole (PRIMARY / PHYSICAL STANDBY / ...)
+            alt dbRole == PRIMARY
+                AAP->>AAP: Add to rotation_targets
+            else STANDBY or UNKNOWN
+                AAP->>AAP: Exclude with warning
+            end
+        end
+    end
 
-```bash
-# Ansible collections
-ansible-galaxy collection install community.hashi_vault
+    rect rgb(255, 245, 230)
+        Note over AAP,Oracle: Phase 2 — Rotation (rotation_targets, serial: rotation_serial)
+        loop Each confirmed PRIMARY (serial batch)
+            AAP->>Vault: OTP SSH lookup (ans_oracle + root)
+            AAP->>ExaCC: SSH → rotate_password role
+            Note over ExaCC,Oracle: See role sequence diagram for detail
+            ExaCC->>Oracle: Validate current credential (sqlplus OS auth)
+            ExaCC->>ExaCC: Write break-glass backup → /etc/oracle/breakglass/
+            ExaCC->>ExaCC: dbaascli database changePassword --user SYS (rotate_password role)
+            ExaCC->>Oracle: Verify new credential (sqlplus)
+            ExaCC->>Vault: POST /role/{name} with new password
+            Vault-->>ExaCC: 200 OK, version incremented
+            ExaCC->>ExaCC: Delete break-glass backup
+            AAP->>AAP: Record ROTATED/SKIPPED to localhost hostvars
+        end
+    end
 
-# Python on control node
-pip install hvac
-
-# Oracle sqlplus available on DB nodes (standard on ExaCC)
-# dbaascli available on DB nodes (standard on ExaCC)
+    rect rgb(245, 230, 255)
+        Note over AAP,Vault: Phase 3 — Summary (localhost)
+        AAP->>AAP: Aggregate rotation_summary + rotation_failures from localhost hostvars
+        AAP->>AAP: set_stats → rotation_report (AAP Artifacts)
+        AAP->>AAP: Print ROTATED / SKIPPED / FAILED / EXCLUDED totals
+    end
 ```
 
 ---
 
 ## Usage
 
+### AAP Job Template
+
+| Field | Value |
+|---|---|
+| Playbook | `main.yml` |
+| Forks | `20` (or match to estate size) |
+| Extra Variables | See table above |
+| Job Slicing | `1` (do not slice — summary aggregation is per-job) |
+
+### CLI
+
 ```bash
-# Set AppRole credentials
-export VAULT_ROLE_ID="your-role-id"
-export VAULT_SECRET_ID="your-secret-id"
+# Dry-run — discovery only, no rotation
+ansible-playbook main.yml --tags discover
 
-# Pre-checks only — no changes
-ansible-playbook rotate_sys_password.yml --tags precheck
+# Standard run
+ansible-playbook main.yml -e environment=prod
 
-# Full run
-ansible-playbook rotate_sys_password.yml
+# Large estate — 10% parallelism
+ansible-playbook main.yml -e environment=prod -e rotation_serial="10%" -f 20
 
-# DG and Commvault actions only (after a partial run)
-ansible-playbook rotate_sys_password.yml --tags action_dg,action_commvault
+# Force rotation regardless of age (set threshold to 0)
+ansible-playbook main.yml -e password_max_age_days=0
 
-# Force topology detection output only
-ansible-playbook rotate_sys_password.yml --tags detect_topology
+# Continue on individual failures
+ansible-playbook main.yml -e rotation_max_fail_pct=100
 ```
+
+---
+
+## Security Notes
+
+- Vault login token is obtained once and stored in memory only (`no_log: true` throughout)
+- Current and new passwords are never written to logs
+- Break-glass backup files (`0600`, root-owned) are written before rotation and deleted on confirmed success
+- Standbys are excluded at Phase 1.5 — no risk of direct standby rotation regardless of `rotation_serial` value
+- OTP SSH credentials are session-scoped and fetched per-batch immediately before the SSH connection opens

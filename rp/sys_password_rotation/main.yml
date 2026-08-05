@@ -307,7 +307,7 @@
               'created_at':           _meta.created_at,
               'current_version':      _meta.current_version,
               'secret_age_days':      _meta.secret_age_days,
-              'current_sys_password': item[1].json.data.password | default(''),
+              'current_oracle_password': item[1].json.data.password | default(''),
               'exacc_members':
                 (item[1].json.data.connection_url.split(',') | map('trim') | list),
               'node_fqdn':
@@ -338,7 +338,7 @@
         oracle_db_name:       "{{ item.oracle_db_name }}"
         node_fqdn:            "{{ item.node_fqdn }}"
         exacc_members:        "{{ item.exacc_members }}"
-        current_sys_password: "{{ item.current_sys_password }}"
+        current_oracle_password: "{{ item.current_oracle_password }}"
         secret_age_days:      "{{ item.secret_age_days }}"
         created_at:           "{{ item.created_at }}"
         current_version:      "{{ item.current_version }}"
@@ -538,7 +538,9 @@
     commvault_notify_only:      true
     commvault_notification_log: "/var/log/ansible/commvault_rotation_notice.log"
   roles:
-    - role: dpe_oracle_rotation
+    - role: rotate_password
+      vars:
+        target_user: "SYS"
 
 # ==============================================================================
 # Phase 3 — End-of-run summary

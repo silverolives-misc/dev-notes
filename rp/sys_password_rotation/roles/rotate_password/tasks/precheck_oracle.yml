@@ -110,26 +110,27 @@
   when: item[1] != 'MOUNTED'
 
 # ==============================================================================
-# Section 5 — SYS credential validation + account status
+# Section 5 — Oracle credential validation + account status
 #
-# Credential check: connects as sys/"$SQLPLUS_CONN" (password via env var to
-# avoid Jinja2/heredoc rendering issues). Fails fast if Vault is out of sync
+# Credential check: connects as target_user/"$SQLPLUS_CONN" (password via env
+# var to avoid Jinja2/heredoc rendering issues). SYS uses 'as sysdba'; other
+# users connect without a privilege clause. Fails fast if Vault is out of sync
 # with Oracle before any rotation is attempted.
 #
 # Account status: uses OS auth (/ as sysdba) — dba_users not in dbaascli.
 # ==============================================================================
 
-- name: "Oracle Pre-check | Validate current SYS credential from Vault"
+- name: "Oracle Pre-check | Validate current {{ target_user }} credential from Vault"
   ansible.builtin.shell: |
     {{ oracle_env }}
     sqlplus -s /nolog <<EOF
     {{ sqlplus_preamble }}
-    CONNECT sys/"$SQLPLUS_CONN" as sysdba
+    CONNECT {{ target_user | lower }}/"$SQLPLUS_CONN"{{ ' as sysdba' if target_user | upper == 'SYS' else '' }}
     SELECT 'CREDENTIAL_OK' FROM dual;
     EXIT;
     EOF
   environment:
-    SQLPLUS_CONN: "{{ current_sys_password }}"
+    SQLPLUS_CONN: "{{ current_oracle_password }}"
   register: _cred_check_raw
   delegate_to: "{{ node_fqdn }}"
   become: true
@@ -142,17 +143,17 @@
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
         account='oracle') }}"
 
-- name: "Oracle Pre-check | Assert Vault SYS credential matches Oracle"
+- name: "Oracle Pre-check | Assert Vault {{ target_user }} credential matches Oracle"
   ansible.builtin.assert:
     that:
       - _cred_check_raw.rc == 0
       - "'CREDENTIAL_OK' in _cred_check_raw.stdout"
     fail_msg: >
-      Current SYS password from Vault does not authenticate against Oracle.
+      Current {{ target_user }} password from Vault does not authenticate against Oracle.
       Vault and Oracle are out of sync — resync manually before rotating.
-    success_msg: "Vault SYS credential validated successfully against Oracle."
+    success_msg: "Vault {{ target_user }} credential validated successfully against Oracle."
 
-- name: "Oracle Pre-check | Query SYS account status via sqlplus"
+- name: "Oracle Pre-check | Query {{ target_user }} account status via sqlplus"
   ansible.builtin.shell: |
     {{ oracle_env }}
     sqlplus -s /nolog <<EOF
@@ -163,10 +164,10 @@
            ||'|'|| profile
            ||'|'|| NVL(TO_CHAR(last_login,'YYYY-MM-DD HH24:MI:SS'),'NULL')
     FROM   dba_users
-    WHERE  username = 'SYS';
+    WHERE  username = '{{ target_user | upper }}';
     EXIT;
     EOF
-  register: sys_account_raw
+  register: account_status_raw
   delegate_to: "{{ node_fqdn }}"
   become: true
   become_user: oracle
@@ -178,20 +179,20 @@
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
         account='oracle') }}"
 
-- name: "Oracle Pre-check | Assert sqlplus returned SYS data"
+- name: "Oracle Pre-check | Assert sqlplus returned {{ target_user }} account data"
   ansible.builtin.assert:
     that:
-      - sys_account_raw.rc == 0
-      - sys_account_raw.stdout_lines | select('match', '^[A-Z]') | list | length > 0
+      - account_status_raw.rc == 0
+      - account_status_raw.stdout_lines | select('match', '^[A-Z]') | list | length > 0
     fail_msg: >
-      sqlplus failed to return SYS account data (RC={{ sys_account_raw.rc }}).
-    success_msg: "SYS account data retrieved successfully."
+      sqlplus failed to return {{ target_user }} account data (RC={{ account_status_raw.rc }}).
+    success_msg: "{{ target_user }} account data retrieved successfully."
 
-- name: "Oracle Pre-check | Parse SYS account facts"
+- name: "Oracle Pre-check | Parse {{ target_user }} account facts"
   ansible.builtin.set_fact:
-    _sys_parsed: >-
+    _account_parsed: >-
       {{
-        sys_account_raw.stdout_lines
+        account_status_raw.stdout_lines
         | select('match', '^[A-Z]')
         | first
         | split('|')
@@ -199,26 +200,26 @@
         | list
       }}
 
-- name: "Oracle Pre-check | Set SYS account facts"
+- name: "Oracle Pre-check | Set {{ target_user }} account facts"
   ansible.builtin.set_fact:
-    sys_account_status_value: "{{ _sys_parsed[0] }}"
-    sys_expiry_date:           "{{ _sys_parsed[1] }}"
-    sys_profile:               "{{ _sys_parsed[2] }}"
-    sys_last_login:            "{{ _sys_parsed[3] }}"
+    account_status_value: "{{ _account_parsed[0] }}"
+    account_expiry_date:  "{{ _account_parsed[1] }}"
+    account_profile:      "{{ _account_parsed[2] }}"
+    account_last_login:   "{{ _account_parsed[3] }}"
 
-- name: "Oracle Pre-check | Display SYS account status"
+- name: "Oracle Pre-check | Display {{ target_user }} account status"
   ansible.builtin.debug:
     msg:
-      - "Account Status : {{ sys_account_status_value }}"
-      - "Profile        : {{ sys_profile }}"
-      - "Expiry Date    : {{ sys_expiry_date }}"
-      - "Last Login     : {{ sys_last_login }}"
+      - "Account Status : {{ account_status_value }}"
+      - "Profile        : {{ account_profile }}"
+      - "Expiry Date    : {{ account_expiry_date }}"
+      - "Last Login     : {{ account_last_login }}"
 
-- name: "Oracle Pre-check | Assert SYS account is not locked"
+- name: "Oracle Pre-check | Assert {{ target_user }} account is not locked"
   ansible.builtin.assert:
     that:
-      - "'LOCKED' not in sys_account_status_value"
+      - "'LOCKED' not in account_status_value"
     fail_msg: >
-      SYS account status is '{{ sys_account_status_value }}'.
+      {{ target_user }} account status is '{{ account_status_value }}'.
       Unlock before attempting rotation.
-    success_msg: "SYS account is not locked (status: {{ sys_account_status_value }})."
+    success_msg: "{{ target_user }} account is not locked (status: {{ account_status_value }})."
