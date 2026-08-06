@@ -148,7 +148,7 @@ EXCLUDED :  2  (Phase 1.5  -  not PRIMARY or unreachable)
 
 h2. Sequence Diagram
 
-{mermaid}
+{code:language=mermaid}
 sequenceDiagram
     autonumber
     participant AAP as AAP / Controller
@@ -207,10 +207,10 @@ sequenceDiagram
         AAP->>AAP: set_stats -> rotation_report (AAP Artifacts)
         AAP->>AAP: Print ROTATED / SKIPPED / FAILED / EXCLUDED totals
     end
-{mermaid}
+{code}
 
 {note:title=Mermaid Plugin Required}
-The diagram above requires the *Mermaid Diagrams for Confluence* app (Atlassian Marketplace). If the plugin is not installed, change the opening {{{{mermaid}}}} tag to {{{{code:language=mermaid}}}} and the closing tag accordingly  -  it will render as a syntax-highlighted code block.
+The diagram above requires the *Mermaid Diagrams for Confluence* app (Atlassian Marketplace). If the plugin is not installed the diagram will render as a syntax-highlighted code block.
 {note}
 
 ----

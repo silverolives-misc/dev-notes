@@ -190,7 +190,7 @@ The {{--prepareStandbyBlob}} / {{--standbyBlobFromPrimary}} mechanism is a nativ
 
 h2. Sequence Diagram
 
-{mermaid}
+{code:language=mermaid}
 sequenceDiagram
     autonumber
     participant PB as Playbook (Phase 2)
@@ -304,10 +304,10 @@ sequenceDiagram
         Note over PB: Phase 12  -  Record Result
         PB->>PB: set_fact rotation_summary -> localhost (ROTATED or SKIPPED)
     end
-{mermaid}
+{code}
 
 {note:title=Mermaid Plugin Required}
-The diagram above requires the *Mermaid Diagrams for Confluence* app (Atlassian Marketplace). If the plugin is not installed, change the opening {{{{mermaid}}}} tag to {{{{code:language=mermaid}}}} and the closing tag accordingly  -  it will render as a syntax-highlighted code block.
+The diagram above requires the *Mermaid Diagrams for Confluence* app (Atlassian Marketplace). If the plugin is not installed the diagram will render as a syntax-highlighted code block.
 {note}
 
 ----
