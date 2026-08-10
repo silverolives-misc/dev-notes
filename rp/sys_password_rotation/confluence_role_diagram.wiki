@@ -8,65 +8,64 @@ Child page of: *rotate_password  -  Ansible Role Reference*
 
 {code:language=mermaid}
 sequenceDiagram
-    autonumber
     participant PB as Playbook (Phase 2)
     participant Vault as HashiCorp Vault
     participant ExaCC as ExaCC Node
     participant Oracle as Oracle DB (sqlplus)
     participant DG as DG Standby Nodes
 
-    Note over PB,Vault: Phase 1  -  Vault Pre-check
-    PB->>Vault: GET /role/{vault_role_name}
+    Note right of PB: Phase 1 - Vault Pre-check
+    PB->>Vault: GET /role/vault_role_name
     Vault-->>PB: created_at, current_version (baseline)
-    PB->>PB: Assert current_oracle_password present; age >= min_age_days
+    PB->>PB: Assert password present, age >= min_age_days
 
-    Note over PB,ExaCC: Phase 2  -  Topology Detection
+    Note right of PB: Phase 2 - Topology Detection
     PB->>ExaCC: dbaascli database getDetails --dbname
     ExaCC-->>PB: dbRole, SCAN, PDB list, topology flags
     PB->>PB: Set db_role, dg_detected, commvault_detected
 
-    Note over PB,Oracle: Phase 3  -  Oracle Pre-check
-    ExaCC->>Oracle: CONNECT {target_user}/"$PASS" [as sysdba if SYS]
+    Note right of PB: Phase 3 - Oracle Pre-check
+    ExaCC->>Oracle: CONNECT target_user/PASS as sysdba (SYS) or CONNECT user/PASS
     Oracle-->>ExaCC: CREDENTIAL_OK
     PB->>Oracle: SELECT from dba_users WHERE username = target_user
     Oracle-->>PB: account_status, expiry_date, account_profile
-    PB->>PB: Assert db_role == PRIMARY; assert account not LOCKED
+    PB->>PB: Assert db_role == PRIMARY, account not LOCKED
 
     opt dg_detected == true
-        Note over PB,Oracle: Phase 4  -  Data Guard Pre-check
+        Note right of PB: Phase 4 - Data Guard Pre-check
         PB->>Oracle: SELECT lag from v$dataguard_stats
-        PB->>PB: Assert lag <= dg_max_lag_seconds; no gap sequences
+        PB->>PB: Assert lag <= dg_max_lag_seconds, no gap sequences
     end
 
-    Note over PB,Oracle: Phase 5  -  Password Policy
+    Note right of PB: Phase 5 - Password Policy
     PB->>Oracle: SELECT from dba_profiles WHERE profile = account_profile
-    Oracle-->>PB: PASSWORD_ROLLOVER_TIME and password limits
+    Oracle-->>PB: PASSWORD_ROLLOVER_TIME and limits
     PB->>PB: Assert PASSWORD_ROLLOVER_TIME >= min_rollover_time_days
 
-    Note over PB,Oracle: Phase 6  -  Session and RMAN Gate
+    Note right of PB: Phase 6 - Session and RMAN Gate
     PB->>Oracle: SELECT from gv$session WHERE username = target_user
     Oracle-->>PB: Active session count
     PB->>Oracle: SELECT from v$rman_backup_job_details WHERE status = RUNNING
     Oracle-->>PB: RMAN job count (fail if > 0)
 
-    Note over PB,ExaCC: Phase 7  -  Evaluate Rotation
+    Note right of PB: Phase 7 - Evaluate Rotation
     PB->>PB: Compare secret_age_days vs password_max_age_days
     alt rotation_required == true
         PB->>ExaCC: Write break-glass file (chmod 0600, root-owned)
     end
 
     opt rotation_required == true
-        Note over PB,ExaCC: Phase 8  -  Rotate
+        Note right of PB: Phase 8 - Rotate
         alt dg_detected and target_user == SYS
             PB->>ExaCC: dbaascli changePassword --user SYS --prepareStandbyBlob
         else non-DG or non-SYS
-            PB->>ExaCC: dbaascli changePassword --user {target_user}
+            PB->>ExaCC: dbaascli changePassword --user target_user
         end
-        PB->>Vault: POST /role/{vault_role_name} with new credential
+        PB->>Vault: POST /role/vault_role_name with new credential
         Vault-->>PB: 200 OK
 
         opt dg_detected == true
-            Note over PB,DG: Phase 9  -  Data Guard Propagation
+            Note right of PB: Phase 9 - Data Guard Propagation
             alt target_user == SYS
                 PB->>ExaCC: SCP blob to each standby
                 loop Each standby
@@ -75,24 +74,24 @@ sequenceDiagram
                 PB->>ExaCC: Delete blob (primary + all standbys)
             else non-SYS
                 loop Each standby
-                    PB->>DG: dbaascli changePassword --user {target_user}
+                    PB->>DG: dbaascli changePassword --user target_user
                 end
             end
             loop Each standby role
-                PB->>Vault: POST /role/{target_user}_{standby}_EXACC
+                PB->>Vault: POST /role/target_user_standby_EXACC
                 Vault-->>PB: 200 OK
             end
         end
 
-        Note over PB,Vault: Phase 11  -  Post-Validation
-        PB->>Oracle: CONNECT {target_user}/"$new_cred" [as sysdba if SYS]
-        Oracle-->>PB: CONNECTION_OK; account_status not LOCKED
-        PB->>Vault: GET /role/{vault_role_name}
+        Note right of PB: Phase 11 - Post-Validation
+        PB->>Oracle: CONNECT target_user/new_cred as sysdba (SYS) or CONNECT user/new_cred
+        Oracle-->>PB: CONNECTION_OK, account_status not LOCKED
+        PB->>Vault: GET /role/vault_role_name
         Vault-->>PB: current_version > pre-rotation baseline
         PB->>ExaCC: Delete break-glass backup file
     end
 
-    Note over PB: Phase 12  -  Record Result
+    Note right of PB: Phase 12 - Record Result
     PB->>PB: set_fact rotation_summary -> localhost (ROTATED or SKIPPED)
 {code}
 
