@@ -156,57 +156,49 @@ sequenceDiagram
     participant ExaCC as ExaCC Node (dbaascli)
     participant Oracle as Oracle DB (sqlplus)
 
-    rect rgb(230, 240, 255)
-        Note over AAP,Vault: Phase 1  -  Discovery (localhost)
-        AAP->>Vault: Authenticate  -  custom login plugin (TTL=6h)
-        Vault-->>AAP: login_token
-        AAP->>Vault: GET /role?list=true
-        Vault-->>AAP: All role names
-        AAP->>AAP: Filter to SYS_*_EXACC, compute age vs threshold
-        AAP->>Vault: GET /role/{name} x N (async, throttled by vault_api_concurrency)
-        Vault-->>AAP: created_at, current_version per role
-        AAP->>Vault: GET /cred/{name} x overdue candidates (async, throttled)
-        Vault-->>AAP: password, connection_url per overdue role
-        AAP->>AAP: Build _verify_candidates in-memory inventory
-    end
+    Note over AAP,Vault: Phase 1  -  Discovery (localhost)
+    AAP->>Vault: Authenticate  -  custom login plugin (TTL=6h)
+    Vault-->>AAP: login_token
+    AAP->>Vault: GET /role?list=true
+    Vault-->>AAP: All role names
+    AAP->>AAP: Filter to SYS_*_EXACC, compute age vs threshold
+    AAP->>Vault: GET /role/{name} x N (async, throttled by vault_api_concurrency)
+    Vault-->>AAP: created_at, current_version per role
+    AAP->>Vault: GET /cred/{name} x overdue candidates (async, throttled)
+    Vault-->>AAP: password, connection_url per overdue role
+    AAP->>AAP: Build _verify_candidates in-memory inventory
 
-    rect rgb(230, 255, 230)
-        Note over AAP,ExaCC: Phase 1.5  -  Live Topology Verification
-        loop Each candidate (serial: verify_serial)
-            AAP->>Vault: OTP SSH lookup (ans_oracle + oracle)
-            AAP->>ExaCC: SSH -> dbaascli database getDetails --dbname
-            ExaCC-->>AAP: JSON -- dbRole, SCAN, PDB list
-            alt dbRole == PRIMARY
-                AAP->>AAP: Add to rotation_targets
-            else STANDBY or UNKNOWN
-                AAP->>AAP: Exclude with warning
-            end
+    Note over AAP,ExaCC: Phase 1.5  -  Live Topology Verification
+    loop Each candidate (serial: verify_serial)
+        AAP->>Vault: OTP SSH lookup (ans_oracle + oracle)
+        AAP->>ExaCC: SSH -> dbaascli database getDetails --dbname
+        ExaCC-->>AAP: JSON with dbRole, SCAN, PDB list
+        alt dbRole == PRIMARY
+            AAP->>AAP: Add to rotation_targets
+        else STANDBY or UNKNOWN
+            AAP->>AAP: Exclude with warning
         end
     end
 
-    rect rgb(255, 245, 230)
-        Note over AAP,Oracle: Phase 2  -  Rotation (serial: rotation_serial)
-        loop Each confirmed PRIMARY
-            AAP->>Vault: OTP SSH lookup (ans_oracle + oracle)
-            AAP->>ExaCC: SSH -> rotate_password role (11 phases)
-            Note over ExaCC,Oracle: See role sequence diagram
-            ExaCC->>Oracle: Validate current credential (sqlplus)
-            ExaCC->>ExaCC: Write break-glass backup (chmod 0600)
-            ExaCC->>ExaCC: dbaascli changePassword --user SYS
-            ExaCC->>Oracle: Verify new credential (sqlplus)
-            ExaCC->>Vault: POST /role/SYS_{name}_EXACC
-            Vault-->>ExaCC: 200 OK -- version incremented
-            ExaCC->>ExaCC: Delete break-glass backup
-            AAP->>AAP: Record ROTATED / SKIPPED to localhost hostvars
-        end
+    Note over AAP,Oracle: Phase 2  -  Rotation (serial: rotation_serial)
+    loop Each confirmed PRIMARY
+        AAP->>Vault: OTP SSH lookup (ans_oracle + oracle)
+        AAP->>ExaCC: SSH -> rotate_password role (11 phases)
+        Note over ExaCC,Oracle: See role sequence diagram for detail
+        ExaCC->>Oracle: Validate current credential (sqlplus)
+        ExaCC->>ExaCC: Write break-glass backup (chmod 0600)
+        ExaCC->>ExaCC: dbaascli changePassword --user SYS
+        ExaCC->>Oracle: Verify new credential (sqlplus)
+        ExaCC->>Vault: POST /role/SYS_{name}_EXACC
+        Vault-->>ExaCC: 200 OK - version incremented
+        ExaCC->>ExaCC: Delete break-glass backup
+        AAP->>AAP: Record ROTATED / SKIPPED to localhost hostvars
     end
 
-    rect rgb(245, 230, 255)
-        Note over AAP: Phase 3  -  Summary (localhost)
-        AAP->>AAP: Aggregate rotation_summary + rotation_failures
-        AAP->>AAP: set_stats -> rotation_report (AAP Artifacts)
-        AAP->>AAP: Print ROTATED / SKIPPED / FAILED / EXCLUDED totals
-    end
+    Note over AAP: Phase 3  -  Summary (localhost)
+    AAP->>AAP: Aggregate rotation_summary + rotation_failures
+    AAP->>AAP: set_stats -> rotation_report (AAP Artifacts)
+    AAP->>AAP: Print ROTATED / SKIPPED / FAILED / EXCLUDED totals
 {code}
 
 {note:title=Mermaid Plugin Required}

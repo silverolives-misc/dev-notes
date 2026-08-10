@@ -45,12 +45,31 @@
   delay: "{{ postgres_upgrade_switchover_wait_delay }}"
   changed_when: false
 
-- name: Upgrade PostgreSQL package on former leader
-  ansible.builtin.include_tasks: upgrade_package.yml
+- name: Upgrade former leader, rolling back if it fails to come back healthy
+  block:
+    - name: Upgrade PostgreSQL package on former leader
+      ansible.builtin.include_tasks: upgrade_package.yml
 
-- name: Wait for former leader to rejoin cluster as healthy replica
-  ansible.builtin.include_tasks: wait_for_healthy.yml
-  vars:
-    expected_roles:
-      - Replica
-      - Sync Standby
+    - name: Wait for former leader to rejoin cluster as healthy replica
+      ansible.builtin.include_tasks: wait_for_healthy.yml
+      vars:
+        expected_roles:
+          - Replica
+          - Sync Standby
+
+  rescue:
+    - name: Roll back former leader to its pre-upgrade package version
+      ansible.builtin.include_tasks: rollback.yml
+      vars:
+        expected_roles:
+          - Replica
+          - Sync Standby
+
+    - name: Fail after successful rollback to halt the rolling upgrade
+      ansible.builtin.fail:
+        msg: >-
+          Upgrade of {{ patroni_member_name }} (former leader) failed and was
+          rolled back to {{ postgres_minor_upgrade_previous_package_version }}.
+          Leadership was already switched to {{ patroni_switchover_candidate }}
+          and was left there. The node is healthy again as a replica;
+          investigate the upgrade failure before retrying.

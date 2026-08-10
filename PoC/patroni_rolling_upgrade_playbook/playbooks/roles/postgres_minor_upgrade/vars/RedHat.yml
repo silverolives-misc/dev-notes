@@ -3,3 +3,8 @@
 postgres_minor_upgrade_package_spec: >-
   {{ postgres_minor_upgrade_package_name ~
      (('-' ~ postgres_minor_upgrade_package_version) if postgres_minor_upgrade_package_version else '') }}
+
+# Used by rollback.yml to re-pin to the version that was running before a
+# failed upgrade attempt.
+postgres_minor_upgrade_rollback_package_spec: >-
+  {{ postgres_minor_upgrade_package_name ~ '-' ~ postgres_minor_upgrade_previous_package_version }}

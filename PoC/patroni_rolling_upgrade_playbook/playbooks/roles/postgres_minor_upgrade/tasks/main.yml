@@ -11,6 +11,23 @@
 - name: Load OS-family specific package spec
   ansible.builtin.include_vars: "{{ ansible_os_family }}.yml"
 
+- name: Gather installed package facts for rollback safety
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Record pre-upgrade installed package version for rollback
+  ansible.builtin.set_fact:
+    postgres_minor_upgrade_previous_package_version: >-
+      {{ ansible_facts.packages[postgres_minor_upgrade_package_name][0].version | default('') }}
+
+- name: Fail if current package version could not be determined
+  ansible.builtin.assert:
+    that:
+      - postgres_minor_upgrade_previous_package_version | length > 0
+    fail_msg: >-
+      Could not find an installed version of {{ postgres_minor_upgrade_package_name }}
+      on {{ patroni_member_name }} to roll back to if the upgrade fails.
+
 - name: Run leader upgrade sequence (switchover, then upgrade)
   ansible.builtin.include_tasks: leader_upgrade.yml
   when: patroni_role in ['leader', 'primary', 'master']

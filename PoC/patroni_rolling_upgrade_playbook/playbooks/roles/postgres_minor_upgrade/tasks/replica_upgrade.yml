@@ -1,10 +1,27 @@
 ---
-- name: Upgrade PostgreSQL package on replica
-  ansible.builtin.include_tasks: upgrade_package.yml
+- name: Upgrade replica, rolling back if it fails to come back healthy
+  block:
+    - name: Upgrade PostgreSQL package on replica
+      ansible.builtin.include_tasks: upgrade_package.yml
 
-- name: Wait for replica to rejoin cluster as healthy
-  ansible.builtin.include_tasks: wait_for_healthy.yml
-  vars:
-    expected_roles:
-      - Replica
-      - Sync Standby
+    - name: Wait for replica to rejoin cluster as healthy
+      ansible.builtin.include_tasks: wait_for_healthy.yml
+      vars:
+        expected_roles:
+          - Replica
+          - Sync Standby
+
+  rescue:
+    - name: Roll back replica to its pre-upgrade package version
+      ansible.builtin.include_tasks: rollback.yml
+      vars:
+        expected_roles:
+          - Replica
+          - Sync Standby
+
+    - name: Fail after successful rollback to halt the rolling upgrade
+      ansible.builtin.fail:
+        msg: >-
+          Upgrade of {{ patroni_member_name }} failed and was rolled back to
+          {{ postgres_minor_upgrade_previous_package_version }}. The node is
+          healthy again; investigate the upgrade failure before retrying.

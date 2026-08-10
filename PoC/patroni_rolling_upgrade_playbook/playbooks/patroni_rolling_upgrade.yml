@@ -158,6 +158,10 @@
   gather_facts: true
   become: true
   serial: 1
+  # A node that fails and rolls back should stop the whole rolling upgrade
+  # rather than let Ansible silently continue on to the next host (or the
+  # leader) with one member already known to be broken.
+  any_errors_fatal: true
 
   tasks:
     - name: Show host being upgraded

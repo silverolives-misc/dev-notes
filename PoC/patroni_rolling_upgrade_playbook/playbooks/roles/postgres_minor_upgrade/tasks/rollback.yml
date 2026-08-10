@@ -1,0 +1,44 @@
+---
+# Reverts this node to the exact package version it was running before a
+# failed upgrade attempt, then confirms it rejoins the cluster healthy.
+#
+# Requires:
+#   expected_roles - list of patronictl Role strings to wait for (passed by
+#                     the caller, same value used for the post-upgrade
+#                     health check)
+#   postgres_minor_upgrade_previous_package_version - captured in
+#                     tasks/main.yml before the upgrade was attempted
+#
+# Leadership is intentionally left where it is: if this is the former
+# leader, it stays a replica after rollback rather than switching over
+# again. Forcing leadership back adds another failover on top of an
+# already-failed upgrade, which is worse for availability than leaving a
+# healthy, reachable node as the new leader.
+
+- name: Stop Patroni service on {{ patroni_member_name }} before rollback
+  ansible.builtin.systemd:
+    name: "{{ patroni_service_name }}"
+    state: stopped
+
+- name: Reinstall previous PostgreSQL package version (Debian)
+  ansible.builtin.apt:
+    name: "{{ postgres_minor_upgrade_rollback_package_spec }}"
+    state: present
+  when: ansible_os_family == 'Debian'
+
+- name: Reinstall previous PostgreSQL package version (RedHat)
+  ansible.builtin.yum:
+    name: "{{ postgres_minor_upgrade_rollback_package_spec }}"
+    state: present
+    allow_downgrade: true
+  when: ansible_os_family == 'RedHat'
+
+- name: Start Patroni service on {{ patroni_member_name }} after rollback
+  ansible.builtin.systemd:
+    name: "{{ patroni_service_name }}"
+    state: started
+
+- name: Wait for rolled-back node to rejoin cluster as healthy
+  ansible.builtin.include_tasks: wait_for_healthy.yml
+  vars:
+    expected_roles: "{{ expected_roles }}"
