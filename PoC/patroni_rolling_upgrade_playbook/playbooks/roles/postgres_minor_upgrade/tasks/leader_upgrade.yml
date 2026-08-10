@@ -49,6 +49,9 @@
   block:
     - name: Upgrade PostgreSQL package on former leader
       ansible.builtin.include_tasks: upgrade_package.yml
+      vars:
+        postgres_minor_upgrade_install_spec: "{{ postgres_minor_upgrade_package_spec }}"
+        postgres_minor_upgrade_install_state: "{{ 'present' if postgres_minor_upgrade_package_version else 'latest' }}"
 
     - name: Wait for former leader to rejoin cluster as healthy replica
       ansible.builtin.include_tasks: wait_for_healthy.yml

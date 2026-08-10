@@ -15,28 +15,11 @@
 # already-failed upgrade, which is worse for availability than leaving a
 # healthy, reachable node as the new leader.
 
-- name: Stop Patroni service on {{ patroni_member_name }} before rollback
-  ansible.builtin.systemd:
-    name: "{{ patroni_service_name }}"
-    state: stopped
-
-- name: Reinstall previous PostgreSQL package version (Debian)
-  ansible.builtin.apt:
-    name: "{{ postgres_minor_upgrade_rollback_package_spec }}"
-    state: present
-  when: ansible_os_family == 'Debian'
-
-- name: Reinstall previous PostgreSQL package version (RedHat)
-  ansible.builtin.yum:
-    name: "{{ postgres_minor_upgrade_rollback_package_spec }}"
-    state: present
-    allow_downgrade: true
-  when: ansible_os_family == 'RedHat'
-
-- name: Start Patroni service on {{ patroni_member_name }} after rollback
-  ansible.builtin.systemd:
-    name: "{{ patroni_service_name }}"
-    state: started
+- name: Reinstall previous PostgreSQL package version
+  ansible.builtin.include_tasks: upgrade_package.yml
+  vars:
+    postgres_minor_upgrade_install_spec: "{{ postgres_minor_upgrade_rollback_package_spec }}"
+    postgres_minor_upgrade_install_state: present
 
 - name: Wait for rolled-back node to rejoin cluster as healthy
   ansible.builtin.include_tasks: wait_for_healthy.yml

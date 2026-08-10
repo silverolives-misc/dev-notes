@@ -1,18 +1,43 @@
 ---
-# Stops Patroni (which stops the PostgreSQL it manages), upgrades the
-# package to the target minor version, then starts Patroni again so it
-# can reattach to the cluster on the new binaries.
+# Stops Patroni (which stops the PostgreSQL it manages), installs the given
+# package spec, then starts Patroni again so it can reattach to the cluster
+# on the new binaries.
+#
+# Shared by the forward upgrade and rollback.yml - installing "the target
+# version" and installing "the previous version" are the same operation,
+# just with a different spec/state, so both call this one task instead of
+# duplicating the stop/install/start sequence.
+#
+# Requires:
+#   postgres_minor_upgrade_install_spec  - exact "name" (or OS-specific
+#                                           pinned "name=version" /
+#                                           "name-version") spec to install
+#   postgres_minor_upgrade_install_state - "present" or "latest"
+#                                           (default: "latest")
+#
+# allow_downgrade is passed unconditionally on RedHat: it's a no-op for
+# state=latest and for present-but-newer, and it's what makes rollback's
+# present-but-older install actually downgrade instead of being a no-op.
 
 - name: Stop Patroni service on {{ patroni_member_name }}
   ansible.builtin.systemd:
     name: "{{ patroni_service_name }}"
     state: stopped
 
-- name: Upgrade PostgreSQL package to target minor version
-  ansible.builtin.package:
-    name: "{{ postgres_minor_upgrade_package_spec }}"
-    state: "{{ 'present' if postgres_minor_upgrade_package_version else 'latest' }}"
-  register: postgres_package_upgrade_result
+- name: Install PostgreSQL package (Debian)
+  ansible.builtin.apt:
+    name: "{{ postgres_minor_upgrade_install_spec }}"
+    state: "{{ postgres_minor_upgrade_install_state | default('latest') }}"
+  when: ansible_os_family == 'Debian'
+  register: postgres_package_install_result
+
+- name: Install PostgreSQL package (RedHat)
+  ansible.builtin.yum:
+    name: "{{ postgres_minor_upgrade_install_spec }}"
+    state: "{{ postgres_minor_upgrade_install_state | default('latest') }}"
+    allow_downgrade: true
+  when: ansible_os_family == 'RedHat'
+  register: postgres_package_install_result
 
 - name: Start Patroni service on {{ patroni_member_name }}
   ansible.builtin.systemd:
