@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # purge_yourmetrics.sh
 # Loops through all databases in a Postgres cluster. For each database with a
-# yourmetrics table, runs two passes over the same set of rows (rows older
-# than RETENTION_DAYS):
+# sboms table, runs two passes over the same set of rows (rows older than
+# RETENTION, excluding protected/release branches):
 #   1. Export the rows to CSV and upload to S3
 #   2. Delete the rows from the table
 # Also writes Prometheus node-exporter textfile metrics.
@@ -15,7 +15,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Configuration – override via environment or edit defaults below
 # ---------------------------------------------------------------------------
-RETENTION_DAYS="${RETENTION_DAYS:-90}"
+RETENTION="${RETENTION:-90 days}"
 PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5432}"
 PGUSER="${PGUSER:-postgres}"
@@ -55,7 +55,7 @@ psql_cmd() {
 # ---------------------------------------------------------------------------
 # Gather list of databases
 # ---------------------------------------------------------------------------
-log "Starting yourmetric purge (retention=${RETENTION_DAYS} days)"
+log "Starting yourmetric purge (retention=${RETENTION})"
 
 command -v aws >/dev/null 2>&1 || { err "aws CLI not found in PATH"; exit 1; }
 
@@ -89,9 +89,26 @@ mapfile -t ALL_DBS < <(
 # that were never exported to S3.
 CUTOFF=$(
     psql_cmd -d postgres -c \
-        "SELECT (NOW() - INTERVAL '${RETENTION_DAYS} days')::timestamptz;"
+        "SELECT (NOW() - INTERVAL '${RETENTION}')::timestamptz;"
 )
-WHERE_CLAUSE="created_at < '${CUTOFF}'"
+
+# Never purge rows on protected branches, their remotes, or anything under
+# release%, regardless of age.
+PROTECTED_BRANCHES_ARRAY="ARRAY['master','main','dev','develop','uat','prod',
+    'remotes/origin/master','remotes/origin/main','remotes/origin/dev','remotes/origin/develop',
+    'remotes/origin/uat','remotes/origin/prod',
+    'remotes/master','remotes/main','remotes/dev','remotes/develop','remotes/uat','remotes/prod']"
+
+WHERE_CLAUSE="posted_at < '${CUTOFF}'
+    AND NOT (
+        git_branches && ${PROTECTED_BRANCHES_ARRAY}
+        OR EXISTS (
+            SELECT 1 FROM UNNEST(git_branches) AS branch
+            WHERE branch LIKE 'release%'
+               OR branch LIKE 'remotes/origin/release%'
+               OR branch LIKE 'remotes/release%'
+        )
+    )"
 log "Retention cutoff: ${CUTOFF}"
 
 # ---------------------------------------------------------------------------
@@ -125,15 +142,15 @@ for db in "${ALL_DBS[@]}"; do
 
     log "Processing database: $db"
 
-    # Check if the yourmetrics table exists in this database
+    # Check if the sboms table exists in this database
     table_exists=$(
         psql_cmd -d "$db" -c \
             "SELECT COUNT(*) FROM information_schema.tables
-             WHERE table_schema = 'public' AND table_name = 'yourmetrics';"
+             WHERE table_schema = 'public' AND table_name = 'sboms';"
     )
 
     if [[ "$table_exists" -eq 0 ]]; then
-        log "  Table 'yourmetrics' not found in $db – skipping"
+        log "  Table 'sboms' not found in $db – skipping"
         (( total_dbs_skipped++ )) || true
         db_rows_deleted["$db"]=0
         db_rows_exported["$db"]=0
@@ -143,12 +160,12 @@ for db in "${ALL_DBS[@]}"; do
     # -----------------------------------------------------------------------
     # Pass 1: export matching rows to CSV and upload to S3
     # -----------------------------------------------------------------------
-    s3_key="${S3_PREFIX}/${db}/yourmetrics_${run_date}.csv"
+    s3_key="${S3_PREFIX}/${db}/sboms_${run_date}.csv.gz"
     s3_uri="s3://${S3_BUCKET}/${s3_key}"
 
     exported=$(
         psql_cmd -d "$db" -c \
-            "SELECT COUNT(*) FROM yourmetrics WHERE ${WHERE_CLAUSE};"
+            "SELECT COUNT(*) FROM sboms WHERE ${WHERE_CLAUSE};"
     )
 
     if [[ "$exported" -eq 0 ]]; then
@@ -157,8 +174,9 @@ for db in "${ALL_DBS[@]}"; do
     else
         if ! psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -v ON_ERROR_STOP=1 --quiet \
                 -d "$db" -c \
-                "COPY (SELECT * FROM yourmetrics WHERE ${WHERE_CLAUSE}) TO STDOUT WITH CSV HEADER" \
-            | aws s3 cp - "$s3_uri"; then
+                "COPY (SELECT * FROM sboms WHERE ${WHERE_CLAUSE}) TO STDOUT WITH CSV HEADER" \
+            | gzip \
+            | aws s3 cp - "$s3_uri" --content-type "text/csv" --content-encoding "gzip"; then
             err "  CSV export to $s3_uri failed for $db"
             (( total_dbs_error++ )) || true
             db_rows_exported["$db"]=-1   # sentinel: error
@@ -173,14 +191,14 @@ for db in "${ALL_DBS[@]}"; do
     # -----------------------------------------------------------------------
     # Pass 2: delete the same rows from the table
     # -----------------------------------------------------------------------
-    # Assumes the yourmetrics table has a column called 'created_at' (TIMESTAMPTZ/DATE).
-    # Adjust the column name below if yours differs.
     deleted=$(
         psql_cmd -d "$db" -c \
-            "DELETE FROM yourmetrics
-             WHERE ${WHERE_CLAUSE}
-             RETURNING 1;" \
-        | wc -l | tr -d ' '
+            "WITH deleted AS (
+                 DELETE FROM sboms
+                 WHERE ${WHERE_CLAUSE}
+                 RETURNING 1
+             )
+             SELECT COUNT(*) FROM deleted;"
     ) || {
         err "  Delete failed on $db"
         (( total_dbs_error++ )) || true
@@ -222,9 +240,9 @@ yourmetric_purge_duration_seconds ${job_duration}
 # TYPE yourmetric_purge_success gauge
 yourmetric_purge_success ${job_success}
 
-# HELP yourmetric_purge_retention_days Configured retention period in days.
-# TYPE yourmetric_purge_retention_days gauge
-yourmetric_purge_retention_days ${RETENTION_DAYS}
+# HELP yourmetric_purge_retention_info Configured retention period (value is always 1; retention is exposed as a label).
+# TYPE yourmetric_purge_retention_info gauge
+yourmetric_purge_retention_info{retention="${RETENTION}"} 1
 
 # HELP yourmetric_purge_rows_exported_total Total rows exported to S3 across all databases in the last run.
 # TYPE yourmetric_purge_rows_exported_total gauge
