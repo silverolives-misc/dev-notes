@@ -172,8 +172,7 @@ for db in "${ALL_DBS[@]}"; do
         log "  No rows to export from $db"
         db_rows_exported["$db"]=0
     else
-        if ! psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -v ON_ERROR_STOP=1 --quiet \
-                -d "$db" -c \
+        if ! psql_cmd -d "$db" -c \
                 "COPY (SELECT * FROM sboms WHERE ${WHERE_CLAUSE}) TO STDOUT WITH CSV HEADER" \
             | gzip \
             | aws s3 cp - "$s3_uri" --content-type "text/csv" --content-encoding "gzip"; then
