@@ -1,0 +1,45 @@
+[Unit]
+Description=PostgreSQL Grafana Alloy Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Create/truncate temporary password file securely
+ExecStartPre=/usr/bin/install -m 0600 /dev/null /home/username/.secrets/grafana-alloy/tls.pass
+
+# Retrieve TLS private-key password
+ExecStartPre=/bin/bash -c '/usr/bin/mgc decryptFromDict --profile /etc/pki/_client_/cert_ccp_profiles/username/profiles.ekp --dict /etc/pki/_client_/certs/username/177760_xouukE_latest.dict --label keyentry > /home/username/.secrets/grafana-alloy/tls.pass'
+
+# Decrypt TLS private key
+ExecStartPre=/usr/bin/openssl rsa -in /home/username/.secrets/grafana-alloy/tls.key -out /home/username/.secrets/grafana-alloy/tls.key.dec -passin file:/home/username/.secrets/grafana-alloy/tls.pass
+
+# Restrict decrypted key permissions
+ExecStartPre=/usr/bin/chmod 0600 /home/username/.secrets/grafana-alloy/tls.key.dec
+
+# Remove temporary password file
+ExecStartPre=/usr/bin/rm -f /home/username/.secrets/grafana-alloy/tls.pass
+
+ExecStart=/home/username/grafana-alloy/bin/grafana-alloy run --server.http.listen-addr=0.0.0.0:12345 /home/username/grafana-alloy/conf/config.alloy
+
+Restart=on-failure
+RestartSec=5
+
+# Remove decrypted key when service stops
+ExecStopPost=/usr/bin/rm -f /home/username/.secrets/grafana-alloy/tls.key.dec
+
+[Install]
+WantedBy=default.target
+
+
+
+################
+
+http {
+  tls {
+    cert_file   = "/home/username/.secrets/grafana-alloy/tls.crt"
+    key_file    = "/home/username/.secrets/grafana-alloy/tls.key.dec"
+    min_version = "TLS12"
+  }
+}
