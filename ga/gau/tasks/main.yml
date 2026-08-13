@@ -1,0 +1,272 @@
+---
+
+- name: FID Owned Tasks
+  become: true
+  become_user: "{{ runtime_user }}"
+  block:
+
+    - name: Set fact for standby
+      ansible.builtin.set_fact:
+        postgresql_standby: >-
+          {{
+            postgresql_standby | bool
+            if postgresql_standby is defined
+            else false
+          }}
+
+    - name: Set fact if the node is primary
+      ansible.builtin.set_fact:
+        postgresql_primary: >-
+          {{
+            not (postgresql_standby | default(false) | bool)
+          }}
+
+    #
+    # Secrets
+    #
+
+    - name: Check for the existence of the secrets file
+      ansible.builtin.stat:
+        path: "{{ grafana_alloy_secrets }}"
+      changed_when: false
+      when: postgresql_postgres_exporter_password is not defined
+      register: secrets_file_find
+
+    - name: Get credentials from environment file when extra vars are not supplied
+      no_log: true
+      when:
+        - postgresql_postgres_exporter_password is not defined
+        - secrets_file_find.stat.exists
+      block:
+
+        - name: Read environment file
+          ansible.builtin.slurp:
+            src: "{{ grafana_alloy_secrets }}"
+          register: grafana_env_file
+
+        - name: Extract variable PG_EXPORTER_PASS
+          ansible.builtin.set_fact:
+            pass_from_envfile: >-
+              {{
+                (grafana_env_file.content | b64decode)
+                | regex_findall('(?m)^PG_EXPORTER_PASS=(.*)$')
+                | first
+                | default('')
+              }}
+          changed_when: false
+
+        - name: Extract variable ALLOY_EP_TOKEN
+          ansible.builtin.set_fact:
+            token_from_envfile: >-
+              {{
+                (grafana_env_file.content | b64decode)
+                | regex_findall('(?m)^ALLOY_EP_TOKEN=(.*)$')
+                | first
+                | default('')
+              }}
+          changed_when: false
+
+    - name: Choose password with extra var precedence
+      ansible.builtin.set_fact:
+        exporter_password: >-
+          {{
+            postgresql_postgres_exporter_password
+            if (
+              postgresql_postgres_exporter_password is defined
+              and postgresql_postgres_exporter_password | length > 0
+            )
+            else pass_from_envfile | default('')
+          }}
+      no_log: true
+
+    - name: Choose token with extra var precedence
+      ansible.builtin.set_fact:
+        alloy_token: >-
+          {{
+            postgresql_alloy_endpoint_token
+            if (
+              postgresql_alloy_endpoint_token is defined
+              and postgresql_alloy_endpoint_token | length > 0
+            )
+            else token_from_envfile | default('')
+          }}
+      no_log: true
+
+    - name: Fail if password is not found
+      ansible.builtin.assert:
+        that:
+          - exporter_password is defined
+          - exporter_password | string | length > 0
+        fail_msg: >-
+          Password could not be determined. Either extra var
+          postgresql_postgres_exporter_password was not defined (uDeploy),
+          or environment file {{ grafana_alloy_secrets }}
+          (Harness) does not exist or is empty.
+      no_log: true
+
+    - name: Fail if token is not found
+      ansible.builtin.assert:
+        that:
+          - alloy_token is defined
+          - alloy_token | string | length > 0
+        fail_msg: >-
+          Token could not be determined. Either extra var
+          postgresql_alloy_endpoint_token was not defined (uDeploy),
+          or environment file {{ grafana_alloy_secrets }}
+          (Harness) does not exist or is empty.
+      no_log: true
+
+    #
+    # Directories
+    #
+
+    - name: Create Grafana Alloy directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - path: "{{ grafana_alloy_home_dir }}"
+          mode: "0750"
+
+        - path: "{{ grafana_alloy_conf_dir }}"
+          mode: "0750"
+
+        - path: "{{ grafana_alloy_bin_dir }}"
+          mode: "0750"
+
+        - path: "{{ grafana_alloy_secrets_dir }}"
+          mode: "0700"
+
+        - path: "{{ grafana_alloy_download_dir }}"
+          mode: "0750"
+
+    #
+    # Determine artifact deployment type
+    #
+
+    - name: Determine Grafana Alloy artifact type
+      ansible.builtin.set_fact:
+        grafana_alloy_install_type: >-
+          {%- if grafana_alloy_download_url
+                is regex('(?i).*\.(tar\.gz|tgz|tar|zip)$') -%}
+          archive
+          {%- elif grafana_alloy_download_url
+                is regex('(?i).*\.rpm$') -%}
+          rpm
+          {%- else -%}
+          binary
+          {%- endif -%}
+
+    - name: Display Grafana Alloy deployment type
+      ansible.builtin.debug:
+        msg: >-
+          Installing Grafana Alloy using deployment type:
+          {{ grafana_alloy_install_type }}
+
+    - name: Validate Grafana Alloy deployment type
+      ansible.builtin.assert:
+        that:
+          - grafana_alloy_install_type in ['archive', 'binary', 'rpm']
+        fail_msg: >-
+          Unsupported Grafana Alloy artifact:
+          {{ grafana_alloy_download_url }}
+
+    #
+    # Install executable
+    #
+
+    - name: Install Grafana Alloy
+      ansible.builtin.include_tasks:
+        file: "install_{{ grafana_alloy_install_type }}.yml"
+
+    #
+    # Verify installation
+    #
+
+    - name: Check Grafana Alloy executable
+      ansible.builtin.stat:
+        path: "{{ grafana_alloy_executable }}"
+      register: grafana_alloy_executable_stat
+
+    - name: Verify Grafana Alloy executable exists
+      ansible.builtin.assert:
+        that:
+          - grafana_alloy_executable_stat.stat.exists
+          - grafana_alloy_executable_stat.stat.executable
+        fail_msg: >-
+          Grafana Alloy executable was not installed correctly at
+          {{ grafana_alloy_executable }}
+
+    #
+    # Configuration
+    #
+
+    - name: Deploy Grafana Alloy configuration
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "{{ grafana_alloy_conf_dir }}/{{ item }}"
+        mode: "0750"
+      loop:
+        - config.alloy
+        - auth.sql
+        - create_pg_stat_statements_ext.sh
+        - postgres_exporter_queries.yaml
+
+    - name: Deploy Grafana Alloy credentials
+      ansible.builtin.template:
+        src: "{{ grafana_alloy_secrets_file }}.j2"
+        dest: "{{ grafana_alloy_secrets_dir }}/{{ grafana_alloy_secrets_file }}"
+        mode: "0600"
+      no_log: true
+
+    #
+    # PostgreSQL configuration
+    #
+
+    - name: Create pg_stat_statements extension
+      ansible.builtin.command:
+        cmd: >-
+          bash
+          {{ grafana_alloy_conf_dir }}/create_pg_stat_statements_ext.sh
+      when: postgresql_primary | bool
+
+    - name: Apply Postgres Exporter authentication SQL script
+      ansible.builtin.command:
+        cmd: >-
+          psql
+          --host {{ postgresql_unix_socket_directories[0] }}
+          --port {{ postgresql_effective_port }}
+          --file {{ grafana_alloy_conf_dir }}/auth.sql
+      when: postgresql_primary | bool
+      register: apply_auth_script
+      changed_when: >-
+        'schema "postgres_exporter" already exists'
+        not in apply_auth_script.stderr
+
+
+- name: Root Owned Tasks
+  become: true
+  become_user: root
+  block:
+
+    - name: Install Grafana Alloy systemd unit file
+      ansible.builtin.template:
+        src: "pg-grafana-alloy.service.j2"
+        dest: "/usr/lib/systemd/user/pg-grafana-alloy.service"
+        mode: "0644"
+
+    - name: Enable lingering
+      ansible.builtin.command:
+        cmd: "loginctl enable-linger {{ runtime_user }}"
+        creates: "/var/lib/systemd/linger/{{ runtime_user }}"
+
+    - name: Enable Grafana Alloy systemd user service
+      ansible.builtin.systemd:
+        name: "{{ grafana_alloy_daemon }}"
+        state: "{{ grafana_alloy_restarted_state }}"
+        enabled: "{{ grafana_alloy_service_enabled }}"
+        scope: user
+        daemon_reload: true
+      become: true
+      become_user: "{{ runtime_user }}"

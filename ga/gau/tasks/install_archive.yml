@@ -1,0 +1,56 @@
+---
+
+- name: Download Grafana Alloy archive
+  ansible.builtin.get_url:
+    url: "{{ grafana_alloy_download_url }}"
+    dest: "{{ grafana_alloy_download_path }}"
+    url_username: "{{ lightspeed.artifactory.username }}"
+    url_password: "{{ lightspeed.artifactory.password }}"
+    force_basic_auth: true
+    validate_certs: false
+    force: true
+    mode: "0644"
+  no_log: true
+  register: grafana_alloy_download
+
+- name: Create temporary Grafana Alloy extraction directory
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: grafana-alloy
+  register: grafana_alloy_extract_dir
+
+- name: Extract Grafana Alloy archive
+  ansible.builtin.unarchive:
+    src: "{{ grafana_alloy_download_path }}"
+    dest: "{{ grafana_alloy_extract_dir.path }}"
+    remote_src: true
+
+- name: Find Grafana Alloy executable in extracted archive
+  ansible.builtin.find:
+    paths: "{{ grafana_alloy_extract_dir.path }}"
+    patterns:
+      - grafana-alloy
+      - alloy
+    file_type: file
+    recurse: true
+  register: grafana_alloy_archive_executables
+
+- name: Verify Grafana Alloy executable was found in archive
+  ansible.builtin.assert:
+    that:
+      - grafana_alloy_archive_executables.matched > 0
+    fail_msg: >-
+      Could not locate a Grafana Alloy executable in
+      {{ grafana_alloy_download_path }}
+
+- name: Install Grafana Alloy executable
+  ansible.builtin.copy:
+    src: "{{ grafana_alloy_archive_executables.files[0].path }}"
+    dest: "{{ grafana_alloy_executable }}"
+    remote_src: true
+    mode: "0755"
+
+- name: Remove temporary extraction directory
+  ansible.builtin.file:
+    path: "{{ grafana_alloy_extract_dir.path }}"
+    state: absent

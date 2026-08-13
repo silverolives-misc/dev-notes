@@ -1,0 +1,14 @@
+---
+
+- name: Download Grafana Alloy executable
+  ansible.builtin.get_url:
+    url: "{{ grafana_alloy_download_url }}"
+    dest: "{{ grafana_alloy_executable }}"
+    url_username: "{{ lightspeed.artifactory.username }}"
+    url_password: "{{ lightspeed.artifactory.password }}"
+    force_basic_auth: true
+    validate_certs: false
+    force: true
+    mode: "0755"
+  no_log: true
+  register: grafana_alloy_download

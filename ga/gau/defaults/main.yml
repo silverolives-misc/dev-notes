@@ -1,0 +1,22 @@
+---
+
+grafana_alloy_download_dir: "/tmp/grafana-alloy"
+
+grafana_alloy_executable: "{{ grafana_alloy_bin_dir }}/grafana-alloy"
+
+grafana_alloy_archive_name: >-
+  {{
+    grafana_alloy_download_url
+    | basename
+  }}
+
+grafana_alloy_download_path: >-
+  {{
+    grafana_alloy_download_dir
+    ~ '/'
+    ~ grafana_alloy_archive_name
+  }}
+
+grafana_alloy_restarted_state: restarted
+
+grafana_alloy_service_enabled: true
