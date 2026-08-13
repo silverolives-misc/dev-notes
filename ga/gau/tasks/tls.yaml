@@ -1,0 +1,62 @@
+- name: Configure Grafana Alloy TLS certificate files
+  when: grafana_alloy_tls_enabled | bool
+  block:
+
+    - name: Find Grafana Alloy TLS certificate links
+      ansible.builtin.find:
+        paths: "/etc/pki/client/certs/{{ runtime_user }}"
+        recurse: false
+        file_type: link
+        patterns:
+          - "cert_{{ csi_id }}_*_latest.pem"
+          - "chain_{{ csi_id }}_*_latest.pem"
+          - "{{ csi_id }}_*_latest.dict"
+      register: grafana_alloy_tls_files
+
+    - name: Set Grafana Alloy TLS source paths
+      ansible.builtin.set_fact:
+        grafana_alloy_tls_server_cert: >-
+          {{
+            grafana_alloy_tls_files.files
+            | map(attribute='path')
+            | select('match', '.*/cert_' ~ csi_id ~ '_.*_latest\.pem$')
+            | first
+          }}
+        grafana_alloy_tls_ca_cert: >-
+          {{
+            grafana_alloy_tls_files.files
+            | map(attribute='path')
+            | select('match', '.*/chain_' ~ csi_id ~ '_.*_latest\.pem$')
+            | first
+          }}
+        grafana_alloy_tls_dict: >-
+          {{
+            grafana_alloy_tls_files.files
+            | map(attribute='path')
+            | select('match', '.*/' ~ csi_id ~ '_.*_latest\.dict$')
+            | first
+          }}
+
+    - name: Validate Grafana Alloy TLS files
+      ansible.builtin.assert:
+        that:
+          - grafana_alloy_tls_server_cert | length > 0
+          - grafana_alloy_tls_ca_cert | length > 0
+          - grafana_alloy_tls_dict | length > 0
+        fail_msg: >-
+          Unable to locate the Grafana Alloy TLS certificate, CA chain,
+          or dictionary for CSI {{ csi_id }} under
+          /etc/pki/client/certs/{{ runtime_user }}.
+
+    - name: Create Grafana Alloy TLS certificate symlinks
+      ansible.builtin.file:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        state: link
+        force: true
+      loop:
+        - src: "{{ grafana_alloy_tls_ca_cert }}"
+          dest: "{{ grafana_alloy_secrets_dir }}/ca.crt"
+
+        - src: "{{ grafana_alloy_tls_server_cert }}"
+          dest: "{{ grafana_alloy_secrets_dir }}/server.crt"
