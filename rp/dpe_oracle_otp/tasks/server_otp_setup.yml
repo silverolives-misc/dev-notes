@@ -21,6 +21,14 @@
     password_expire_warn: "{{ hostvars.localhost.dpe_aap_account.pw_expire_warn if ansible_version.full is ansible.builtin.version('2.16', '>=') else omit }}"
     expires:               "{{ hostvars.localhost.dpe_aap_account.pw_expires }}"
 
+- name: Create yum repo definition {{ hostvars.localhost.vault_helper_repo.id }}
+  ansible.builtin.yum_repository:
+    name:        "{{ hostvars.localhost.vault_helper_repo.id }}"
+    description: "{{ hostvars.localhost.vault_helper_repo.description }}"
+    baseurl:     "{{ hostvars.localhost.vault_helper_repo.baseurl }}"
+    enabled:     "{{ hostvars.localhost.vault_helper_repo.enabled }}"
+    gpgcheck:    "{{ hostvars.localhost.vault_helper_repo.gpgcheck }}"
+
 - name: Install package {{ hostvars.localhost.vault_helper.package }}
   ansible.builtin.package:
     name: "{{ hostvars.localhost.vault_helper.package }}"

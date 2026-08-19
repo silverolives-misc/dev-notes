@@ -28,6 +28,16 @@ vault_helper:
     - "ITID/12410399_AAP"
     - "ITID/243880_DPORAENG"
 
+# yum/dnf repo definition that carries the vault_helper.package RPM.
+# Needs to be present on the host before server_otp_setup.yml tries to
+# install the package, and is checked (via repoquery) in client_check.yml.
+vault_helper_repo:
+  id:          "_client_-tooling"
+  description: "_client_ tooling repo (rhel-{{ ansible_distribution_major_version }}-tooling)"
+  baseurl:     "https://GL-NLB-WEB-systems.hk._client_/repos/rhel/{{ ansible_distribution_major_version }}/x86_64/rhel-{{ ansible_distribution_major_version }}-tooling"
+  enabled:     1
+  gpgcheck:    0
+
 otp_setup_ok: false
 
 dpe_legacy_ssh_user: 'oraansible'

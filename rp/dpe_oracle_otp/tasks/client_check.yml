@@ -12,6 +12,16 @@
       ansible.builtin.set_fact:
         helper_package_installed: "{{ hostvars.localhost.vault_helper.package in ansible_facts.packages }}"
 
+    - name: Check {{ hostvars.localhost.vault_helper.package }} is resolvable via repoquery
+      ansible.builtin.command: dnf repoquery --available {{ hostvars.localhost.vault_helper.package }}
+      register: helper_package_repoquery
+      changed_when: false
+      failed_when: false
+
+    - name: Set fact for package availability in configured repos
+      ansible.builtin.set_fact:
+        helper_package_available: "{{ helper_package_repoquery.rc == 0 and (helper_package_repoquery.stdout | trim | length > 0) }}"
+
     - name: Check ansible user {{ hostvars.localhost.dpe_aap_account.name }} exists
       ansible.builtin.getent:
         database: passwd
@@ -182,6 +192,7 @@
                 )
             }}
           helper_package_installed: "{{ helper_package_installed | default(false) }}"
+          helper_package_available: "{{ helper_package_available | default(false) }}"
           helper_binary_exists: "{{ helper_bin.stat.exists | default(false) }}"
           helper_config_exists: >-
             {{ helper_cfg.results
@@ -217,6 +228,7 @@
           - otp_validation.user_exists
           - otp_validation.group_membership
           - otp_validation.helper_package_installed
+          - otp_validation.helper_package_available
           - otp_validation.helper_binary_exists
           - otp_validation.helper_config_exists
           - otp_validation.pam_sshd_exists
