@@ -22,6 +22,22 @@
       ansible.builtin.set_fact:
         helper_package_available: "{{ helper_package_repoquery.rc == 0 and (helper_package_repoquery.stdout | trim | length > 0) }}"
 
+    - name: Check tooling repo file exists
+      ansible.builtin.stat:
+        path: "/etc/yum.repos.d/{{ hostvars.localhost.vault_helper_repo.id }}.repo"
+      register: vault_helper_repo_file
+
+    - name: Read tooling repo file
+      ansible.builtin.slurp:
+        path: "/etc/yum.repos.d/{{ hostvars.localhost.vault_helper_repo.id }}.repo"
+      register: vault_helper_repo_file_content
+      when: vault_helper_repo_file.stat.exists
+
+    - name: Show tooling repo file content on this host
+      ansible.builtin.debug:
+        msg: "{{ (vault_helper_repo_file_content.content | b64decode).split('\n') }}"
+      when: vault_helper_repo_file.stat.exists
+
     - name: Check ansible user {{ hostvars.localhost.dpe_aap_account.name }} exists
       ansible.builtin.getent:
         database: passwd
