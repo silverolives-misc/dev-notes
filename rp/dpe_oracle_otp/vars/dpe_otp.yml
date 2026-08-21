@@ -32,18 +32,19 @@ vault_helper:
 # Needs to be present on the host before server_otp_setup.yml tries to
 # install the package, and is checked (via repoquery) in client_check.yml.
 #
-# baseurl_prefix has no OS-version segment: this dict is loaded onto
-# localhost (vars/dpe_otp.yml, gather_facts: no), and hostvars.localhost.*
-# templates against localhost's own facts, not the target host's. The
-# per-host rhel-<major>-tooling path segment is built in the task itself,
-# where ansible_distribution_major_version resolves against the current
-# (target) host.
+# Uses dnf's own $releasever/$basearch repo variables rather than an
+# Ansible fact: this dict is loaded onto localhost (gather_facts: no),
+# so any Ansible fact referenced here would template against localhost's
+# (nonexistent) facts, not the target host's. $releasever/$basearch are
+# resolved by dnf itself, per host, at repo-refresh time - no Ansible
+# templating involved, and Ansible passes the literal $-syntax through
+# untouched since it isn't Jinja.
 vault_helper_repo:
-  id:            "_client_-tooling"
-  description:   "_client_ tooling repo"
-  baseurl_prefix: "https://GL-NLB-WEB-systems.hk._client_/repos/rhel"
-  enabled:       1
-  gpgcheck:      0
+  id:          "_client_-tooling"
+  description: "_client_ tooling repo"
+  baseurl:     "https://GL-NLB-WEB-systems.hk._client_/repos/rhel/$releasever/$basearch/rhel-$releasever-tooling"
+  enabled:     1
+  gpgcheck:    0
 
 otp_setup_ok: false
 
