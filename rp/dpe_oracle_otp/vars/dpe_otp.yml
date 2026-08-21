@@ -31,12 +31,19 @@ vault_helper:
 # yum/dnf repo definition that carries the vault_helper.package RPM.
 # Needs to be present on the host before server_otp_setup.yml tries to
 # install the package, and is checked (via repoquery) in client_check.yml.
+#
+# baseurl_prefix has no OS-version segment: this dict is loaded onto
+# localhost (vars/dpe_otp.yml, gather_facts: no), and hostvars.localhost.*
+# templates against localhost's own facts, not the target host's. The
+# per-host rhel-<major>-tooling path segment is built in the task itself,
+# where ansible_distribution_major_version resolves against the current
+# (target) host.
 vault_helper_repo:
-  id:          "_client_-tooling"
-  description: "_client_ tooling repo (rhel-{{ ansible_distribution_major_version }}-tooling)"
-  baseurl:     "https://GL-NLB-WEB-systems.hk._client_/repos/rhel/{{ ansible_distribution_major_version }}/x86_64/rhel-{{ ansible_distribution_major_version }}-tooling"
-  enabled:     1
-  gpgcheck:    0
+  id:            "_client_-tooling"
+  description:   "_client_ tooling repo"
+  baseurl_prefix: "https://GL-NLB-WEB-systems.hk._client_/repos/rhel"
+  enabled:       1
+  gpgcheck:      0
 
 otp_setup_ok: false
 

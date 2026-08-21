@@ -25,7 +25,7 @@
   ansible.builtin.yum_repository:
     name:        "{{ hostvars.localhost.vault_helper_repo.id }}"
     description: "{{ hostvars.localhost.vault_helper_repo.description }}"
-    baseurl:     "{{ hostvars.localhost.vault_helper_repo.baseurl }}"
+    baseurl:     "{{ hostvars.localhost.vault_helper_repo.baseurl_prefix }}/{{ ansible_distribution_major_version }}/x86_64/rhel-{{ ansible_distribution_major_version }}-tooling"
     enabled:     "{{ hostvars.localhost.vault_helper_repo.enabled }}"
     gpgcheck:    "{{ hostvars.localhost.vault_helper_repo.gpgcheck }}"
 
