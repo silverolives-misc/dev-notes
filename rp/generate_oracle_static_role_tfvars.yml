@@ -60,11 +60,18 @@
 
     - name: "Build | Populate _exacc_nodes group from extra-var list"
       ansible.builtin.add_host:
-        name:         "{{ item }}"
-        groups:       _exacc_nodes
-        ansible_host: "{{ item }}"
-        ansible_user: ans_oracle
-        login_token:  "{{ login_token }}"
+        name:              "{{ item }}"
+        groups:            _exacc_nodes
+        ansible_host:      "{{ item }}"
+        ansible_user:      ans_oracle
+        # Pin explicitly: if this inventory sets ansible_connection=local
+        # on the 'all' group (common leftover from localhost-only setups),
+        # dynamically added hosts silently inherit it — every 'become'
+        # task then runs inside the AAP execution container as root
+        # instead of SSHing to the real node, which is why su couldn't
+        # find the oracle account (it doesn't exist in the container).
+        ansible_connection: ssh
+        login_token:       "{{ login_token }}"
       loop: "{{ exacc_node_list }}"
       loop_control:
         label: "{{ item }}"
@@ -220,11 +227,14 @@
       ansible.builtin.set_fact:
         exacc_db_unique_names: "{{ srvctl_db_list.stdout_lines | reject('equalto', '') | list }}"
 
-    - name: "Discover | Get host topology for each database in this cluster"
+    - name: "Discover | Get configured topology for each database in this cluster"
+      # config (not status) — reflects the database's designed RAC
+      # topology regardless of current up/down state, so a database
+      # stopped for maintenance doesn't drop out of these static roles.
       ansible.builtin.raw: >-
-        PATH={{ grid_home }}/bin:/usr/bin:/bin srvctl status database -db "{{ item }}"
+        PATH={{ grid_home }}/bin:/usr/bin:/bin srvctl config database -db "{{ item }}" -verbose
       loop: "{{ exacc_db_unique_names }}"
-      register: srvctl_db_status
+      register: srvctl_db_config
       changed_when: false
 
     - name: "Discover | Build db_unique_name → [hosts] topology map"
@@ -232,10 +242,11 @@
         exacc_db_topology: >-
           {{
             exacc_db_topology | default({}) | combine({
-              item.item: (item.stdout | regex_findall('is running on node (\S+)') | unique | sort)
+              item.item: (item.stdout | regex_findall('^Configured nodes: (.+)$', multiline=True)
+                | first | default('', true) | split(',') | reject('equalto', '') | unique | sort)
             })
           }}
-      loop: "{{ srvctl_db_status.results }}"
+      loop: "{{ srvctl_db_config.results }}"
       loop_control:
         label: "{{ item.item }}"
 
