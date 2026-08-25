@@ -92,6 +92,11 @@
     grid_home: "/u01/app/19.0.0.0/grid"
     srvctl_env:
       PATH: "{{ grid_home }}/bin:/usr/bin:/bin"
+    # ans_oracle and oracle are both members of 'wheel' on the ExaCC
+    # nodes, so Ansible can group-scope (0750) the temp exec dir instead
+    # of needing chown/setfacl (which su can't grant to an unprivileged
+    # connecting user) or falling back to world-readable tmpfiles.
+    ansible_common_remote_group: "wheel"
     ansible_ssh_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
         login_token=hostvars[inventory_hostname]['login_token'],
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
@@ -104,8 +109,12 @@
   tasks:
 
     - name: "Fingerprint | List this host's cluster peers via olsnodes"
-      ansible.builtin.command: olsnodes
-      environment: "{{ srvctl_env }}"
+      # raw bypasses Ansible's module temp-file machinery entirely (no
+      # _make_tmp_path), so it sidesteps the su/become chown-ownership
+      # error that command/shell hit when the connecting user (ans_oracle)
+      # can't grant the become user (oracle) read access to a temp dir.
+      # environment: isn't reliably honored by raw, so PATH is inlined.
+      ansible.builtin.raw: "PATH={{ grid_home }}/bin:/usr/bin:/bin olsnodes"
       register: olsnodes_result
       changed_when: false
       ignore_errors: true
@@ -187,6 +196,8 @@
     oracle_role_usernames: ["sys"]
     role_suffix:           "EXACC"
     debug_output:          false
+    # See Play 2's identical setting for why this is required.
+    ansible_common_remote_group: "wheel"
     ansible_ssh_pass: "{{ lookup('_client_.epe.ssh_otp', ansible_host,
         login_token=hostvars[inventory_hostname]['login_token'],
         ssh_role=lookup('env', '_CLIENT__HASHI_ROLE'),
@@ -199,8 +210,9 @@
   tasks:
 
     - name: "Discover | Get list of database unique names for this cluster"
-      ansible.builtin.command: srvctl config database
-      environment: "{{ srvctl_env }}"
+      # raw avoids the same become/chown temp-file error as the olsnodes
+      # task above — see the comment there for why.
+      ansible.builtin.raw: "PATH={{ grid_home }}/bin:/usr/bin:/bin srvctl config database"
       register: srvctl_db_list
       changed_when: false
 
@@ -209,8 +221,8 @@
         exacc_db_unique_names: "{{ srvctl_db_list.stdout_lines | reject('equalto', '') | list }}"
 
     - name: "Discover | Get host topology for each database in this cluster"
-      ansible.builtin.command: srvctl status database -db "{{ item }}"
-      environment: "{{ srvctl_env }}"
+      ansible.builtin.raw: >-
+        PATH={{ grid_home }}/bin:/usr/bin:/bin srvctl status database -db "{{ item }}"
       loop: "{{ exacc_db_unique_names }}"
       register: srvctl_db_status
       changed_when: false
