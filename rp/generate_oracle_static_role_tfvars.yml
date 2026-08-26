@@ -242,7 +242,8 @@
         exacc_db_topology: >-
           {{
             exacc_db_topology | default({}) | combine({
-              item.item: (item.stdout | regex_findall('^Configured nodes: (.+)$', multiline=True)
+              item.item: (item.stdout | replace('\r', '')
+                | regex_findall('^Configured nodes: (.+)$', multiline=True)
                 | first | default('', true) | split(',') | reject('equalto', '') | unique | sort)
             })
           }}
@@ -273,9 +274,24 @@
       loop_control:
         label: "{{ item.0 }}/{{ item.1 }}"
 
+    - name: "Discover | Format oracle_static_roles as HCL for pasting into tfvars"
+      ansible.builtin.set_fact:
+        oracle_static_roles_hcl: |-
+          {% for key, val in oracle_static_roles.items() %}
+          {{ key }} = {
+            username        = "{{ val.username }}"
+            connection_url = "{{ val.connection_url }}"
+          }
+          {% endfor %}
+
     - name: "Discover | Show this cluster's role map (debug only)"
       ansible.builtin.debug:
         var: oracle_static_roles
+      when: debug_output | bool
+
+    - name: "Discover | Show this cluster's role map as HCL (debug only)"
+      ansible.builtin.debug:
+        msg: "{{ oracle_static_roles_hcl.split('\n') }}"
       when: debug_output | bool
 
 
