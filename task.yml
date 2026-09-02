@@ -1,0 +1,380 @@
+---
+# Oracle patch download / verify / unzip pipeline.
+#
+# This is a rework of the original playbook: everything up through the
+# integrity check and the space-estimation listing is unchanged. The
+# "figure out which README/inventory.xml describes each patch" section
+# (originally two tasks doing regex-over-unzip-l-output + a "reduce to
+# one file" step) has been replaced with a simpler two-part design:
+#
+#   1. Reuse the SAME `unzip -l` output already captured for the space
+#      check to compute the exact candidate file list via regex (cheap,
+#      no extra I/O, and precise about path depth in a way `unarchive`'s
+#      fnmatch-based `include:` can't be on its own).
+#   2. Resolve "which file wins for this patch" via direct path
+#      membership checks (`x in candidate_list`) instead of sibling
+#      searches / subelements grouping -- since Oracle's layout is fixed
+#      (inventory.xml always at <id>/etc/config/inventory.xml, README
+#      always at <id>/README.html or <id>/README.txt), there's no need
+#      to search for siblings; we can just ask "does the winning path
+#      exist in the list?" directly, for each of the two cases:
+#        - bundle archive (has its own root-level README) -> one entry
+#          per real child patch directory, root readme dropped
+#        - ordinary archive (no root-level README) -> one entry total,
+#          even if it happens to have multiple internal numbered dirs
+#          (some multi-component patches do, without being a "bundle")
+#
+# Everything from "Extract patch info file" onward is unchanged from the
+# original -- files_to_extract has the same shape (patchid/zipfile/dest/
+# file) so none of the downstream description-parsing, Grid/JDK/OPatch
+# classification, target_patches selection, or final unzip logic needs
+# to change.
+
+- name: Delete contents of {{ patch_home }}
+  ansible.builtin.file:
+    path: "{{ patch_home }}"
+    state: "{{ dir_action }}"
+    owner: oracle
+    group: oinstall
+    mode: '0750'
+  register: delete_results
+  loop:
+    - absent
+    - directory
+  loop_control:
+    loop_var: dir_action
+
+- name: Get list of artifacts from nexus repository group {{ nexus.group }}
+  ansible.builtin.uri:
+    url: "{{ nexus.url }}/service/rest/v1/search?repository={{ nexus.repository }}&group={{ nexus.group }}"
+    url_username: "{{ nexus_user }}"
+    url_password: "{{ nexus_password }}"
+    return_content: true
+    method: get
+    force_basic_auth: true
+  check_mode: false
+  register: nexus_listing
+
+- name: Set the json_query search
+  ansible.builtin.set_fact:
+    srchstring: "p\\d+_{{ oracle_version | regex_replace('^(\\d).+$', '\\1' ) }}.*zip$"
+
+- name: Get a list of patches from the nexus listing
+  set_fact:
+    download_list: >-
+      {{ nexus_listing.json
+         | json_query(querystr)
+         | select
+         | flatten
+         | selectattr('downloadUrl', 'search', srchstring) }}
+  vars:
+    querystr: "items[].assets[?!contains(downloadUrl,'WIN')].{ downloadUrl: downloadUrl }"
+
+- name: Download the available patches fromm nexus
+  ansible.builtin.get_url:
+    url: "{{ patch.downloadUrl }}"
+    username: "{{ nexus_user }}"
+    password: "{{ nexus_password }}"
+    dest: "{{ patch_home }}/{{ patch.downloadUrl.split('/')[-1] }}"
+    owner: 'oracle'
+    group: 'oinstall'
+    force_basic_auth: true
+    tmp_dest: /var/tmp
+    force: true
+  register: downloads_result
+  loop: "{{ download_list }}"
+  loop_control:
+    loop_var: patch
+    label: "{{ patch.downloadUrl }}"
+
+- name: Get list of successfully downloaded patches
+  ansible.builtin.set_fact:
+    patch_download_success: >-
+      {{ downloads_result.results
+         | json_query(jq_query)
+         | list }}
+  vars:
+    jq_query: "[?contains(to_string(status_code),'200')].{ patchloc: dest }"
+
+- name: Fail if we don't get the correct number of patches
+  ansible.builtin.fail:
+    msg: "Expected {{ download_list | length }}, Downloaded {{ patch_download_success | length }}"
+  when: download_list | length != patch_download_success | length
+
+- name: Run unzip with integrity checking
+  ansible.builtin.command: "/usr/bin/unzip -q -t {{ p.patchloc }}"
+  register: unzip_integrity
+  become: true
+  become_user: "{{ oracle_generic_info.oracle_user }}"
+  become_method: sudo
+  loop: "{{ patch_download_success }}"
+  loop_control:
+    loop_var: p
+    label: "{{ p.patchloc }}"
+  changed_when: false
+  ignore_errors: true
+
+- name: Get list of corrupted zipfiles
+  ansible.builtin.set_fact:
+    zipfiles_corrupted: "{{ unzip_integrity.results | json_query('[?rc > `0`].p') }}"
+
+- name: Fail if corruption detected
+  ansible.builtin.fail:
+    msg: "Corruption in the following zipfiles\n{{ zipfiles_corrupted }}"
+  when: zipfiles_corrupted is defined and zipfiles_corrupted | length > 0
+
+- name: run unzip with list mode to estimate size of extracted archive
+  ansible.builtin.command: "/usr/bin/unzip -l {{ p.patchloc }}"
+  register: unzip_listing
+  become: true
+  become_user: "{{ oracle_generic_info.oracle_user }}"
+  become_method: sudo
+  loop: "{{ patch_download_success }}"
+  loop_control:
+    loop_var: p
+    label: "{{ p.patchloc }}"
+  changed_when: false
+
+# --------------------------------------------------------------------
+# Description-discovery: replaces the original "Build list of inventory
+# and README files" + "Now reduce the list" tasks.
+# --------------------------------------------------------------------
+
+- name: Build exact candidate file list + bundle classification for each archive
+  ansible.builtin.set_fact:
+    patch_info_files: "{{ patch_info_files | d([]) + [ {
+        'patchid': outer_patchid,
+        'zipfile': zip_listing.p.patchloc,
+        'dest': dest,
+        'file': all_matches,
+        'is_bundle': is_bundle,
+        'segs': segs
+      } ] }}"
+  vars:
+    outer_patchid: "{{ zip_listing.p.patchloc | regex_replace('^.*/p(\\d+)_.*?$', '\\1') }}"
+    dest: "{{ patch_home + '/' + zip_listing.stdout_lines[3].split()[-1].rstrip('/') }}"
+    # depth-aware: finds README.html/README.txt/etc/config/inventory.xml at
+    # ANY nesting depth under a numbered dir or OPatch/, not just one level --
+    # needed because bundle archives nest their children one level deeper
+    # than ordinary single-component archives do.
+    all_matches: "{{ zip_listing.stdout
+        | regex_findall('\\s+\\S*?((?:\\d+|OPatch)/(?:README\\.(?:html|txt)|etc/config/inventory\\.xml))', multiline=True)
+        | list }}"
+    # a root-level README is the ONLY reliable signal that this archive is a
+    # true multi-patch bundle -- some ordinary single patches also contain
+    # multiple internal numbered directories without being a bundle, so
+    # detecting "bundle-ness" from directory structure alone is unreliable.
+    is_bundle: "{{ (outer_patchid + '/README.html' in all_matches) or (outer_patchid + '/README.txt' in all_matches) }}"
+    segs: "{{ all_matches | map('regex_replace', '^([^/]+)/.*$', '\\1') | unique | list }}"
+  loop: "{{ unzip_listing.results }}"
+  loop_control:
+    loop_var: zip_listing
+    label: "{{ zip_listing.p.patchloc }}"
+
+- name: "Bundle archives -- one entry per real child patch, inventory.xml preferred over README"
+  ansible.builtin.set_fact:
+    files_to_extract: "{{ files_to_extract | d([]) + [ {
+        'patchid': (info_file[1] if info_file[1] != 'OPatch' else info_file[0].patchid),
+        'zipfile': info_file[0].zipfile,
+        'dest': info_file[0].dest,
+        'file': picked
+      } ] }}"
+  vars:
+    # Oracle's layout is fixed, so the winning path for a given child is
+    # always one of these three exact strings -- just check which one (if
+    # any) is actually present, in priority order. No sibling search needed.
+    picked: >-
+      {{ (info_file[1] + '/etc/config/inventory.xml') if (info_file[1] + '/etc/config/inventory.xml') in info_file[0].file
+         else (info_file[1] + '/README.html') if (info_file[1] + '/README.html') in info_file[0].file
+         else (info_file[1] + '/README.txt') if (info_file[1] + '/README.txt') in info_file[0].file
+         else none }}
+  # the root-level README itself (info_file[1] == info_file[0].patchid) is
+  # excluded here -- real children take priority over it once the archive
+  # is a bundle.
+  when: info_file[0].is_bundle and info_file[1] != info_file[0].patchid and picked is not none
+  loop: "{{ patch_info_files | subelements('segs') }}"
+  loop_control:
+    loop_var: info_file
+    label: "{{ info_file[1] }}"
+
+- name: "Ordinary archives -- one entry total, even if multiple internal numbered dirs exist"
+  ansible.builtin.set_fact:
+    files_to_extract: "{{ files_to_extract | d([]) + [ {
+        'patchid': info_file.patchid,
+        'zipfile': info_file.zipfile,
+        'dest': info_file.dest,
+        'file': picked
+      } ] }}"
+  vars:
+    picked: >-
+      {{ (info_file.file | select('search','inventory\.xml') | list | first | default(none))
+         or (info_file.file | select('search','README\.html') | list | first | default(none))
+         or (info_file.file | select('search','README\.txt')  | list | first | default(none)) }}
+  when: not info_file.is_bundle and picked is not none
+  loop: "{{ patch_info_files }}"
+  loop_control:
+    loop_var: info_file
+    label: "{{ info_file.zipfile }}"
+
+# --------------------------------------------------------------------
+# Everything below is unchanged from the original -- files_to_extract
+# has the same shape (patchid/zipfile/dest/file) regardless of which
+# branch above populated a given entry.
+# --------------------------------------------------------------------
+
+- name: Create directory to extract README files
+  ansible.builtin.file:
+    path: "{{ patch_home }}/PATCHINFO"
+    state: "{{ item }}"
+    owner: oracle
+    group: oinstall
+    mode: '0750'
+  loop:
+    - "absent"
+    - "directory"
+
+- name: Extract patch info file
+  ansible.builtin.unarchive:
+    src: "{{ info_file.zipfile }}"
+    dest: "{{ patch_home }}/PATCHINFO"
+    include: "{{ info_file.file }}"
+    remote_src: true
+  ignore_errors: true
+  register: extracted_info_files
+  become: true
+  become_user: "{{ oracle_generic_info.oracle_user }}"
+  become_method: sudo
+  loop: "{{ files_to_extract }}"
+  loop_control:
+    loop_var: info_file
+    label: "{{ info_file.zipfile }}"
+
+- name: Read the patch info file
+  ansible.builtin.slurp:
+    src: "{{ patch_home + '/PATCHINFO/' + patch_info.file }}"
+  register: patch_info_data
+  loop: "{{ files_to_extract }}"
+  loop_control:
+    loop_var: patch_info
+    label: "{{ patch_info.file }}"
+
+- name: Get the patch descritpion
+  set_fact:
+    patch_details: "{{ patch_details | d([]) + [ {
+        'patchid':     patch_data.patch_info.patchid,
+        'zip':         patch_data.patch_info.zipfile,
+        'dest':        patch_data.patch_info.dest,
+        'description': patch_data.content
+            | b64decode
+            | regex_findall(search_string | trim )
+            | unique
+            | first | d(none)
+      } ]
+    }}"
+  vars:
+    search_string: |-
+      {% if patch_data.source.endswith('.xml') %}
+      <patch_description>(.*?)</patch_description>
+      {% elif 'OPatch' in patch_data.source %}
+      (OPatch\s+\d+(?:\.(?:\d+)?)*)
+      {% elif patch_data.source.endswith('.html') %}
+      (Patch\s+\d{8}\s+.*?)[<\"%>]
+      {% else %}
+      \d{8}
+      {% endif %}
+  loop: "{{ patch_info_data.results }}"
+  loop_control:
+    loop_var: patch_data
+    label: "{{ patch_data.source }}"
+
+- name: Get the patch ID for Grid, JDK and OPatch
+  set_fact:
+    grid_patchid:   "{{ patch_details
+                         | selectattr('description','search','\\bGI\\b')
+                         | map(attribute='patchid')
+                         | first
+                         | d(none) }}"
+    jdk_patchid:    "{{ patch_details
+                         | selectattr('description','search','\\bJDK\\b')
+                         | map(attribute='patchid')
+                         | first
+                         | d(none) }}"
+    opatch_patchid: "{{ patch_details
+                         | selectattr('description','search','\\bOPatch\\b')
+                         | map(attribute='patchid')
+                         | first
+                         | d(none) }}"
+
+- name: Patches for single_instance
+  set_fact:
+    target_patches: "{{ patch_details
+                         | rejectattr('patchid','search',grid_patchid)
+                         | map(attribute='patchid')
+                         | join('|') }}"
+  when: oracle_pattern == 'single_instance'
+
+- name: Patches for Grid
+  set_fact:
+    target_patches: "{{ patch_details
+                         | selectattr('patchid','search',grid_patchid + '|' + opatch_patchid + '|' + jdk_patchid )
+                         | map(attribute='patchid') | join('|') }}"
+  when: oracle_pattern == 'rac_grid'
+
+- name: Get the estimated bytes needed to unzip the patches
+  ansible.builtin.set_fact:
+    zipfiles_bytes_required: "{{ unzip_listing.results
+        | selectattr('p.patchloc','search',target_patches)
+        | json_query('[].stdout_lines[-1]')
+        | map('regex_replace', '^\\s*(\\d+)\\D+.*$', '\\1' )
+        | map('int')
+        | sum }}"
+
+- name: Get mount point facts
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "mounts"
+  register: mount_details
+
+- name: Get available free bytes for {{ patch_fs }}
+  ansible.builtin.set_fact:
+    fs_free_bytes: "{{ ansible_mounts | selectattr('mount','equalto', patch_fs ) | map(attribute='size_available') | first | int }}"
+
+- name: Fail if there is not enough free storage to unzip
+  ansible.builtin.fail:
+    msg:
+      - "Not enough free space in {{ patch_fs }} to unzip the patches. "
+      - "Free Space: {{ fs_free_bytes | int }}"
+      - "Required:   {{ zipfiles_bytes_required | int  }}"
+  when: fs_free_bytes | int < zipfiles_bytes_required | int
+
+- name: Unzip downloaded patches
+  ansible.builtin.unarchive:
+    src: "{{ patch.zip }}"
+    dest: "{{ patch_home }}"
+    extra_opts:
+      - -q
+    remote_src: true
+  ignore_errors: true
+  register: unarchive_result
+  become: true
+  become_user: "{{ oracle_generic_info.oracle_user }}"
+  become_method: sudo
+  loop: "{{ patch_details | selectattr('patchid','search',target_patches) }}"
+  loop_control:
+    loop_var: patch
+    label: "{{ patch.patchid }}"
+
+- name: check for errors in unzip
+  ansible.builtin.set_fact:
+    unzip_errors: "{{ unarchive_result.results | json_query('[?failed == `true`].src') }}"
+
+- name: Fail if unzip errors detected
+  ansible.builtin.fail:
+    msg: "Error unzipping the following zipfiles\n{{ unzip_errors }}"
+  when: unzip_errors is defined and unzip_errors | length > 0
+
+- debug: var=patch_details
+- debug:
+    msg: "{{ patch_details | rejectattr('patchid', 'search', opatch_patchid + '|' + grid_patchid + '|' + jdk_patchid ) | sort(attribute='patchid') }}"
+...
