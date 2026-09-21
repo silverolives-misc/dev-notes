@@ -1,0 +1,58 @@
+---
+# Requires from the caller:
+#   expected_roles         - list of patronictl Role strings to wait for
+#   expected_data_dir       - data directory that should be backing the
+#                             running instance once it's healthy (new_data_dir
+#                             on the forward path, old_data_dir on rollback)
+#   expected_major_version - PG_VERSION content expected in that directory
+
+- name: Poll cluster state until this node is running with an expected role
+  ansible.builtin.command:
+    cmd: "{{ patronictl_bin }} -c {{ patroni_config_file }} list {{ patroni_scope }} -f json"
+  register: patroni_cluster_health
+  until: >-
+    (patroni_cluster_health.stdout | from_json
+      | selectattr('Member', 'equalto', patroni_member_name)
+      | map(attribute='State') | list | first | default('')) == 'running'
+    and
+    (patroni_cluster_health.stdout | from_json
+      | selectattr('Member', 'equalto', patroni_member_name)
+      | map(attribute='Role') | list | first | default('')) in expected_roles
+  retries: "{{ postgres_upgrade_health_check_retries }}"
+  delay: "{{ postgres_upgrade_health_check_delay }}"
+  changed_when: false
+
+- name: Capture final member state
+  ansible.builtin.set_fact:
+    patroni_member_final_state: >-
+      {{ patroni_cluster_health.stdout | from_json
+         | selectattr('Member', 'equalto', patroni_member_name) | list | first }}
+
+- name: Check replication lag is within acceptable bounds
+  ansible.builtin.assert:
+    that:
+      - (patroni_member_final_state['Lag in MB'] | float * 1024 * 1024) <= postgres_upgrade_max_lag_bytes
+    fail_msg: >-
+      {{ patroni_member_name }} rejoined but replication lag
+      ({{ patroni_member_final_state['Lag in MB'] }} MB) exceeds threshold
+  when: "'Lag in MB' in patroni_member_final_state"
+
+- name: Confirm the running data directory reports the expected major version
+  ansible.builtin.command: "cat {{ expected_data_dir }}/PG_VERSION"
+  register: postgres_major_upgrade_pgversion_file
+  changed_when: false
+  when: expected_data_dir is defined and expected_major_version is defined
+
+- name: Assert running PostgreSQL major version matches what we expect at this point
+  ansible.builtin.assert:
+    that:
+      - postgres_major_upgrade_pgversion_file.stdout | trim == expected_major_version | string
+    fail_msg: >-
+      {{ patroni_member_name }} data directory {{ expected_data_dir }} reports
+      PG_VERSION {{ postgres_major_upgrade_pgversion_file.stdout | trim }},
+      expected {{ expected_major_version }}
+  when: expected_data_dir is defined and expected_major_version is defined
+
+- name: Show final Patroni member state
+  ansible.builtin.debug:
+    var: patroni_member_final_state

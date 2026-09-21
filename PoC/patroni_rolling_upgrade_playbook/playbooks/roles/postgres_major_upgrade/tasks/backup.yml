@@ -1,0 +1,47 @@
+---
+# Takes a pgBackRest backup of the running, pre-upgrade cluster. Runs
+# against the live old cluster - pgBackRest doesn't need Postgres stopped -
+# so this executes before the cluster is paused and adds no extra downtime
+# on top of the pg_upgrade step itself.
+#
+# This task only takes the backup. It deliberately does NOT attempt a
+# restore anywhere in this role: a full pgBackRest restore is a slow,
+# high-blast-radius operation against production data, and should be a
+# deliberate action a human takes after looking at what actually failed -
+# not something a rescue block fires unattended. See tasks/rollback.yml for
+# where a failed pg_upgrade in link mode hands the operator the restore
+# command instead of running it.
+
+- name: Run pgBackRest backup of the pre-upgrade cluster
+  ansible.builtin.command:
+    cmd: >-
+      pgbackrest --stanza={{ postgres_major_upgrade_pgbackrest_stanza }}
+      --type={{ postgres_major_upgrade_pgbackrest_backup_type }}
+      backup
+  become: true
+  become_user: "{{ postgres_major_upgrade_os_user }}"
+  register: postgres_major_upgrade_backup_result
+  changed_when: true
+
+- name: Confirm the backup pgBackRest now reports as most recent
+  ansible.builtin.command:
+    cmd: "pgbackrest --stanza={{ postgres_major_upgrade_pgbackrest_stanza }} --output=json info"
+  become: true
+  become_user: "{{ postgres_major_upgrade_os_user }}"
+  register: postgres_major_upgrade_backup_info
+  changed_when: false
+
+- name: Fail if pgBackRest reports no backups for this stanza after running
+  ansible.builtin.assert:
+    that:
+      - (postgres_major_upgrade_backup_info.stdout | from_json | first).backup | default([]) | length > 0
+    fail_msg: >-
+      pgbackrest backup command exited 0 but stanza
+      {{ postgres_major_upgrade_pgbackrest_stanza }} shows no backups -
+      refusing to proceed without a confirmed pre-upgrade backup.
+
+- name: Show pre-upgrade backup result
+  ansible.builtin.debug:
+    msg:
+      stanza: "{{ postgres_major_upgrade_pgbackrest_stanza }}"
+      backup_output: "{{ postgres_major_upgrade_backup_result.stdout_lines }}"

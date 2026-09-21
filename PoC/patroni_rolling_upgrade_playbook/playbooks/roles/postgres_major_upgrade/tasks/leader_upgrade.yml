@@ -1,0 +1,114 @@
+---
+# Runs once, against the leader, with the whole Patroni cluster already
+# paused by the calling playbook. Unlike a minor upgrade there's nothing to
+# switch away from here: pg_upgrade only runs against the primary, so the
+# leader has to be upgraded in place first, before any replica can be
+# rebuilt against it.
+
+- name: Create pg_upgrade working directory
+  ansible.builtin.file:
+    path: "{{ postgres_major_upgrade_work_dir }}"
+    state: directory
+    owner: "{{ postgres_major_upgrade_os_user }}"
+    group: "{{ postgres_major_upgrade_os_group }}"
+    mode: "0700"
+
+- name: Check whether new data directory is already initialized
+  ansible.builtin.stat:
+    path: "{{ postgres_major_upgrade_new_data_dir }}/PG_VERSION"
+  register: postgres_major_upgrade_new_datadir_check
+
+- name: Initialize new data directory with initdb
+  ansible.builtin.command:
+    cmd: >-
+      {{ postgres_major_upgrade_new_bin_dir }}/initdb
+      -D {{ postgres_major_upgrade_new_data_dir }}
+      {{ postgres_major_upgrade_initdb_options }}
+  become: true
+  become_user: "{{ postgres_major_upgrade_os_user }}"
+  when: not postgres_major_upgrade_new_datadir_check.stat.exists
+
+- name: Run pg_upgrade --check against the running old cluster
+  ansible.builtin.command:
+    cmd: >-
+      {{ postgres_major_upgrade_new_bin_dir }}/pg_upgrade
+      --check
+      -b {{ postgres_major_upgrade_old_bin_dir }} -B {{ postgres_major_upgrade_new_bin_dir }}
+      -d {{ postgres_major_upgrade_old_data_dir }} -D {{ postgres_major_upgrade_new_data_dir }}
+  args:
+    chdir: "{{ postgres_major_upgrade_work_dir }}"
+  become: true
+  become_user: "{{ postgres_major_upgrade_os_user }}"
+  changed_when: false
+
+- name: Upgrade leader, rolling back if it fails to come back healthy
+  block:
+    - name: Stop Patroni service on leader (cluster is already paused)
+      ansible.builtin.systemd:
+        name: "{{ patroni_service_name }}"
+        state: stopped
+
+    - name: Run pg_upgrade on the leader
+      ansible.builtin.command:
+        cmd: >-
+          {{ postgres_major_upgrade_new_bin_dir }}/pg_upgrade
+          -b {{ postgres_major_upgrade_old_bin_dir }} -B {{ postgres_major_upgrade_new_bin_dir }}
+          -d {{ postgres_major_upgrade_old_data_dir }} -D {{ postgres_major_upgrade_new_data_dir }}
+          --{{ postgres_major_upgrade_mode }}
+      args:
+        chdir: "{{ postgres_major_upgrade_work_dir }}"
+      become: true
+      become_user: "{{ postgres_major_upgrade_os_user }}"
+      register: postgres_major_upgrade_result
+
+    - name: Point Patroni at the new bin_dir
+      ansible.builtin.replace:
+        path: "{{ patroni_config_file }}"
+        regexp: '^(\s*bin_dir:).*$'
+        replace: '\1 {{ postgres_major_upgrade_new_bin_dir }}'
+
+    - name: Point Patroni at the new data_dir
+      ansible.builtin.replace:
+        path: "{{ patroni_config_file }}"
+        regexp: '^(\s*data_dir:).*$'
+        replace: '\1 {{ postgres_major_upgrade_new_data_dir }}'
+
+    - name: Start Patroni service on leader (new major version)
+      ansible.builtin.systemd:
+        name: "{{ patroni_service_name }}"
+        state: started
+
+    - name: Wait for leader to come back healthy on the new version
+      ansible.builtin.include_tasks: wait_for_healthy.yml
+      vars:
+        expected_roles:
+          - Leader
+        expected_data_dir: "{{ postgres_major_upgrade_new_data_dir }}"
+        expected_major_version: "{{ postgres_major_upgrade_new_version }}"
+
+    - name: Run pg_upgrade's generated analyze script against the new cluster
+      ansible.builtin.command:
+        cmd: ./analyze_new_cluster.sh
+        chdir: "{{ postgres_major_upgrade_work_dir }}"
+      become: true
+      become_user: "{{ postgres_major_upgrade_os_user }}"
+      changed_when: true
+
+  rescue:
+    - name: Roll back leader to the old data directory (copy mode only)
+      ansible.builtin.include_tasks: rollback.yml
+      vars:
+        expected_roles:
+          - Leader
+
+    - name: Fail after successful rollback to halt the major upgrade
+      ansible.builtin.fail:
+        msg: >-
+          pg_upgrade of leader {{ patroni_member_name }} failed and was
+          rolled back to PostgreSQL {{ postgres_major_upgrade_old_version }}
+          ({{ postgres_major_upgrade_old_data_dir }}). The cluster remains
+          paused. Investigate before retrying - no replicas were touched.
+
+- name: Show pg_upgrade output
+  ansible.builtin.debug:
+    var: postgres_major_upgrade_result.stdout_lines

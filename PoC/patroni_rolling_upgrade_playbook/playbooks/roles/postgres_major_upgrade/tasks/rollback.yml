@@ -1,0 +1,62 @@
+---
+# Points Patroni back at the pre-upgrade bin_dir/data_dir and confirms the
+# node rejoins the cluster healthy on the old version. Shared by both
+# leader_upgrade.yml and replica_upgrade.yml, same DRY pattern as
+# postgres_minor_upgrade's rollback.yml.
+#
+# Requires `expected_roles` from the caller (same convention as
+# postgres_minor_upgrade).
+#
+# Only automatic in copy mode. link mode hard-links the old and new data
+# files together, so once pg_upgrade has run and the new cluster has been
+# started, the old data directory is no longer independent and this task
+# won't touch it. A pre-upgrade pgBackRest backup was already taken
+# (tasks/backup.yml, before this run started) - restoring it is deliberately
+# left as a manual step rather than run unattended here: it's slow and a
+# big blast-radius action against production data, worth a human looking
+# at what actually failed first. This task fails with the exact command.
+
+- name: Refuse to roll back automatically in link mode
+  ansible.builtin.fail:
+    msg: >-
+      postgres_major_upgrade_mode is 'link' - the old data directory is no
+      longer independent and cannot be reverted to automatically. A
+      pre-upgrade pgBackRest backup exists for stanza
+      {{ postgres_major_upgrade_pgbackrest_stanza }}. To restore
+      {{ patroni_member_name }}: run `pgbackrest --stanza={{ postgres_major_upgrade_pgbackrest_stanza }}
+      info` to confirm which backup to use, stop Patroni, run
+      `pgbackrest --stanza={{ postgres_major_upgrade_pgbackrest_stanza }} --delta
+      --pg1-path={{ postgres_major_upgrade_old_data_dir }} restore`, point
+      patroni.yml's bin_dir/data_dir back at
+      {{ postgres_major_upgrade_old_bin_dir }} / {{ postgres_major_upgrade_old_data_dir }},
+      then start Patroni.
+  when: postgres_major_upgrade_mode == 'link'
+
+- name: Stop Patroni service before reverting
+  ansible.builtin.systemd:
+    name: "{{ patroni_service_name }}"
+    state: stopped
+
+- name: Point Patroni back at the old bin_dir
+  ansible.builtin.replace:
+    path: "{{ patroni_config_file }}"
+    regexp: '^(\s*bin_dir:).*$'
+    replace: '\1 {{ postgres_major_upgrade_old_bin_dir }}'
+
+- name: Point Patroni back at the old data_dir
+  ansible.builtin.replace:
+    path: "{{ patroni_config_file }}"
+    regexp: '^(\s*data_dir:).*$'
+    replace: '\1 {{ postgres_major_upgrade_old_data_dir }}'
+
+- name: Start Patroni service on the old version
+  ansible.builtin.systemd:
+    name: "{{ patroni_service_name }}"
+    state: started
+
+- name: Wait for node to rejoin cluster healthy on the old version
+  ansible.builtin.include_tasks: wait_for_healthy.yml
+  vars:
+    expected_roles: "{{ expected_roles }}"
+    expected_data_dir: "{{ postgres_major_upgrade_old_data_dir }}"
+    expected_major_version: "{{ postgres_major_upgrade_old_version }}"

@@ -1,0 +1,57 @@
+---
+- name: Assert patroni_role hostvar was provided by the calling playbook
+  ansible.builtin.assert:
+    that:
+      - patroni_role is defined
+      - patroni_role in ['leader', 'primary', 'master', 'replica', 'standby_leader']
+    fail_msg: >-
+      patroni_role must be set to a known Patroni role by the discovery play
+      (got: {{ patroni_role | default('undefined') }})
+
+- name: Assert old and new version are set and different
+  ansible.builtin.assert:
+    that:
+      - postgres_major_upgrade_old_version | string != postgres_major_upgrade_new_version | string
+    fail_msg: >-
+      postgres_major_upgrade_old_version and postgres_major_upgrade_new_version
+      must be set to different values
+      (got: {{ postgres_major_upgrade_old_version }} -> {{ postgres_major_upgrade_new_version }})
+
+- name: Load OS-family specific bin_dir/data_dir/package spec
+  ansible.builtin.include_vars: "{{ ansible_os_family }}.yml"
+
+- name: Refuse to proceed without acknowledging manual-restore-only recovery in link mode
+  ansible.builtin.assert:
+    that:
+      - postgres_major_upgrade_backup_confirmed | bool
+    fail_msg: >-
+      postgres_major_upgrade_backup_confirmed is false. A pre-upgrade
+      pgBackRest backup is taken automatically earlier in the playbook
+      (tasks/backup.yml), but in link mode recovering from a failed
+      pg_upgrade means a manual pgBackRest restore (see tasks/rollback.yml)
+      - there is no automatic revert. Pass
+      -e postgres_major_upgrade_backup_confirmed=true to acknowledge this
+      and proceed.
+  when: postgres_major_upgrade_mode == 'link'
+
+- name: Confirm new major version binaries are installed before touching anything
+  ansible.builtin.stat:
+    path: "{{ postgres_major_upgrade_new_bin_dir }}/pg_upgrade"
+  register: postgres_major_upgrade_new_binary_check
+
+- name: Fail if new major version package is not installed
+  ansible.builtin.assert:
+    that:
+      - postgres_major_upgrade_new_binary_check.stat.exists
+    fail_msg: >-
+      {{ postgres_major_upgrade_new_bin_dir }}/pg_upgrade not found on
+      {{ patroni_member_name }} - the install_package.yml play should have
+      installed {{ postgres_major_upgrade_new_package }} before this role ran.
+
+- name: Run leader upgrade sequence (pg_upgrade in place)
+  ansible.builtin.include_tasks: leader_upgrade.yml
+  when: patroni_role in ['leader', 'primary', 'master']
+
+- name: Run replica rebuild sequence
+  ansible.builtin.include_tasks: replica_upgrade.yml
+  when: patroni_role in ['replica', 'standby_leader']

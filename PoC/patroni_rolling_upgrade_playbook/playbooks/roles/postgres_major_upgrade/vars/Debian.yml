@@ -1,0 +1,9 @@
+---
+postgres_major_upgrade_old_bin_dir: "/usr/lib/postgresql/{{ postgres_major_upgrade_old_version }}/bin"
+postgres_major_upgrade_new_bin_dir: "/usr/lib/postgresql/{{ postgres_major_upgrade_new_version }}/bin"
+postgres_major_upgrade_old_data_dir: "/var/lib/postgresql/{{ postgres_major_upgrade_old_version }}/main"
+postgres_major_upgrade_new_data_dir: "/var/lib/postgresql/{{ postgres_major_upgrade_new_version }}/main"
+
+# PGDG apt package providing the new major version's server binaries.
+# Must already be installed before this role runs - it does not install it.
+postgres_major_upgrade_new_package: "postgresql-{{ postgres_major_upgrade_new_version }}"

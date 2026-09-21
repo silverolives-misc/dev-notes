@@ -1,0 +1,85 @@
+---
+# postgres_major_upgrade defaults
+#
+# Called once per host from the patroni_major_upgrade playbook's leader/
+# replica groups, same pattern as postgres_minor_upgrade. Expects
+# patroni_role as a hostvar set by the calling playbook's add_host tasks.
+#
+# A major version upgrade replaces the on-disk cluster format, so unlike
+# the minor-upgrade role this is NOT a like-for-like binary swap:
+#   - the leader runs pg_upgrade once, into a brand new data directory
+#   - every replica is rebuilt from scratch against the upgraded leader
+#     (patronictl reinit), not patched in place
+# The whole cluster is paused (patronictl pause) by the calling playbook
+# for the duration so Patroni doesn't attempt failover/restarts while
+# nodes are being taken apart and rebuilt out from under it.
+
+# -- Patroni service / CLI ------------------------------------------------
+patroni_service_name: patroni
+patroni_venv_path: /opt/patroni/venv
+patronictl_bin: "{{ patroni_venv_path }}/bin/patronictl"
+patroni_config_file: /etc/patroni/patroni.yml
+patroni_scope: postgres-cluster
+patroni_member_name: "{{ inventory_hostname }}"
+
+# -- Versions being upgraded between ---------------------------------------
+# Both required. Used to build the default bin_dir/data_dir/package names
+# in vars/{Debian,RedHat}.yml - override those directly instead if your
+# layout doesn't match the OS packaging convention assumed here.
+postgres_major_upgrade_old_version: "15"
+postgres_major_upgrade_new_version: "16"
+
+# -- pg_upgrade behaviour ---------------------------------------------------
+# link (default here) hard-links old and new data files together instead
+# of copying them, so it needs negligible extra disk and is much faster -
+# required when there isn't spare disk for a full second copy of the
+# cluster. The trade-off: once the new cluster starts, the old data
+# directory shares inodes with it and can no longer be trusted as a
+# rollback target (see tasks/rollback.yml, which refuses to run in this
+# mode). Set to copy instead only on a host with ~2x the cluster's disk
+# free, where you want "revert bin_dir/data_dir and restart" as a rollback
+# path with no data loss.
+postgres_major_upgrade_mode: link  # copy | link
+
+# link mode has no automatic rollback path - a pre-upgrade pgBackRest
+# backup is taken automatically (tasks/backup.yml, before the cluster is
+# even paused), but recovering from a failed pg_upgrade means a manual
+# pgBackRest restore (see tasks/rollback.yml), not an automatic revert.
+# The role refuses to run pg_upgrade until this is explicitly set true,
+# acknowledging that. Pass -e postgres_major_upgrade_backup_confirmed=true
+# to proceed.
+postgres_major_upgrade_backup_confirmed: false
+
+# -- Pre-upgrade backup (pgBackRest) -----------------------------------------
+# Taken against the live, running old cluster before the cluster is paused
+# or anything is touched, so it adds no extra downtime on top of the
+# pg_upgrade step itself.
+postgres_major_upgrade_pgbackrest_stanza: "{{ patroni_scope }}"
+postgres_major_upgrade_pgbackrest_backup_type: full  # full | diff | incr
+
+# initdb options for the new data directory MUST match the old cluster's
+# locale/encoding/checksum settings or pg_upgrade --check will refuse to
+# run. Confirm these against the old cluster (e.g. `pg_controldata
+# {{ <old data_dir> }}`) before running - they are not auto-detected.
+postgres_major_upgrade_initdb_options: "--encoding=UTF8 --locale=en_US.UTF-8 --data-checksums"
+
+# Working directory pg_upgrade is run from - it writes its logs and the
+# generated analyze_new_cluster.sh / delete_old_cluster.sh scripts to its
+# current working directory.
+postgres_major_upgrade_work_dir: "/var/lib/postgresql/pg_upgrade_{{ postgres_major_upgrade_old_version }}_to_{{ postgres_major_upgrade_new_version }}"
+
+# OS user pg_upgrade / initdb / patronictl must run as.
+postgres_major_upgrade_os_user: postgres
+postgres_major_upgrade_os_group: postgres
+
+# How many replicas to rebuild at once. Each one runs a full basebackup
+# (or whatever create_replica_method patroni.yml configures) against the
+# new leader, so keep this low to avoid saturating it.
+postgres_major_upgrade_replica_serial: 1
+
+# -- Health check tuning ----------------------------------------------------
+# Rebuilding a replica from scratch takes much longer than a minor-upgrade
+# restart, so these defaults are more generous than postgres_minor_upgrade's.
+postgres_upgrade_health_check_retries: 60
+postgres_upgrade_health_check_delay: 15
+postgres_upgrade_max_lag_bytes: 16777216

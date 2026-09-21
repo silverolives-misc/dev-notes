@@ -1,0 +1,80 @@
+---
+# Replicas can't be upgraded in place - a different major version can't
+# stream from another major version, so each replica is rebuilt from
+# scratch against the already-upgraded leader via patronictl reinit
+# (whatever create_replica_method patroni.yml configures - pg_basebackup
+# by default, or a custom pgBackRest/WAL-G method). This only runs after
+# leader_upgrade.yml has already succeeded, so there is always a healthy
+# leader on the new version to rebuild from.
+#
+# The old replica data directory is left untouched by this task (only the
+# new, empty one is created/emptied), so rollback.yml can still point
+# Patroni back at it if the rebuild fails.
+
+- name: Rebuild replica on the new major version, rolling back if it fails to come back healthy
+  block:
+    - name: Stop Patroni service on replica
+      ansible.builtin.systemd:
+        name: "{{ patroni_service_name }}"
+        state: stopped
+
+    - name: Point Patroni at the new bin_dir
+      ansible.builtin.replace:
+        path: "{{ patroni_config_file }}"
+        regexp: '^(\s*bin_dir:).*$'
+        replace: '\1 {{ postgres_major_upgrade_new_bin_dir }}'
+
+    - name: Point Patroni at the new (empty) data_dir
+      ansible.builtin.replace:
+        path: "{{ patroni_config_file }}"
+        regexp: '^(\s*data_dir:).*$'
+        replace: '\1 {{ postgres_major_upgrade_new_data_dir }}'
+
+    - name: Ensure new data directory exists and is empty
+      ansible.builtin.file:
+        path: "{{ postgres_major_upgrade_new_data_dir }}"
+        state: "{{ item }}"
+        owner: "{{ postgres_major_upgrade_os_user }}"
+        group: "{{ postgres_major_upgrade_os_group }}"
+        mode: "0700"
+      loop:
+        - absent
+        - directory
+
+    - name: Start Patroni service pointed at the new, empty data directory
+      ansible.builtin.systemd:
+        name: "{{ patroni_service_name }}"
+        state: started
+
+    - name: Trigger patronictl reinit to rebuild this member on the new version
+      ansible.builtin.command:
+        cmd: >-
+          {{ patronictl_bin }} -c {{ patroni_config_file }} reinit
+          {{ patroni_scope }} {{ patroni_member_name }} --force --wait
+      changed_when: true
+
+    - name: Wait for replica to rejoin cluster healthy on the new version
+      ansible.builtin.include_tasks: wait_for_healthy.yml
+      vars:
+        expected_roles:
+          - Replica
+          - Sync Standby
+        expected_data_dir: "{{ postgres_major_upgrade_new_data_dir }}"
+        expected_major_version: "{{ postgres_major_upgrade_new_version }}"
+
+  rescue:
+    - name: Roll back replica to the old data directory
+      ansible.builtin.include_tasks: rollback.yml
+      vars:
+        expected_roles:
+          - Replica
+          - Sync Standby
+
+    - name: Fail after successful rollback to halt the major upgrade
+      ansible.builtin.fail:
+        msg: >-
+          Rebuild of replica {{ patroni_member_name }} on PostgreSQL
+          {{ postgres_major_upgrade_new_version }} failed and was rolled
+          back to {{ postgres_major_upgrade_old_version }}
+          ({{ postgres_major_upgrade_old_data_dir }}). Investigate before
+          retrying.

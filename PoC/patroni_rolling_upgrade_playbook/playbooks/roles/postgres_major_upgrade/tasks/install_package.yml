@@ -1,0 +1,46 @@
+---
+# Installs the new major version's PostgreSQL server package on this host,
+# so pg_upgrade / initdb (on the leader) and the new binaries a rebuilt
+# replica needs are actually present. Called from its own playbook play,
+# on every node (leader and replicas), before the cluster is paused - the
+# package download/install has no need to happen inside the paused-cluster
+# write-downtime window, so keeping it out of that window is a direct part
+# of minimizing disruption.
+#
+# Old and new major versions install to version-suffixed paths
+# (/usr/lib/postgresql/<ver> on Debian, /usr/pgsql-<ver> on RedHat) and
+# coexist on disk without conflict - this does not touch or remove the
+# currently-running old version's package.
+
+- name: Load OS-family specific bin_dir/data_dir/package spec
+  ansible.builtin.include_vars: "{{ ansible_os_family }}.yml"
+
+- name: Install new PostgreSQL major version package (Debian)
+  ansible.builtin.apt:
+    name: "{{ postgres_major_upgrade_new_package }}"
+    state: present
+    update_cache: true
+  when: ansible_os_family == 'Debian'
+  register: postgres_major_upgrade_package_install_result
+
+- name: Install new PostgreSQL major version package (RedHat)
+  ansible.builtin.yum:
+    name: "{{ postgres_major_upgrade_new_package }}"
+    state: present
+  when: ansible_os_family == 'RedHat'
+  register: postgres_major_upgrade_package_install_result
+
+- name: Confirm pg_upgrade binary is present after install
+  ansible.builtin.stat:
+    path: "{{ postgres_major_upgrade_new_bin_dir }}/pg_upgrade"
+  register: postgres_major_upgrade_new_binary_check
+
+- name: Fail if new major version package did not provide pg_upgrade
+  ansible.builtin.assert:
+    that:
+      - postgres_major_upgrade_new_binary_check.stat.exists
+    fail_msg: >-
+      {{ postgres_major_upgrade_new_bin_dir }}/pg_upgrade still not found on
+      {{ inventory_hostname }} after installing
+      {{ postgres_major_upgrade_new_package }} - check the package layout
+      matches vars/{{ ansible_os_family }}.yml.

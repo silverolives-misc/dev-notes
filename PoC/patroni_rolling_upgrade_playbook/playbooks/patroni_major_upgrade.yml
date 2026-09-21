@@ -1,0 +1,291 @@
+---
+# Playbook: Patroni-aware PostgreSQL MAJOR version upgrade
+#
+# Unlike patroni_rolling_upgrade.yml (minor versions, live rolling), a
+# major version upgrade changes the on-disk cluster format, so replicas
+# cannot simply stream from a different major version. This is a
+# maintenance-window operation, not a live rolling upgrade - expect write
+# downtime for the duration of Play 6.
+#
+# Flow:
+#   Play 1 - discovery runs on every host in the environment "all" group
+#            (same pattern as patroni_rolling_upgrade.yml)
+#   Play 2 - localhost builds patroni_leader (1 host) and patroni_replicas
+#            in-memory groups from hostvars
+#   Play 3 - installs the new major version's package on every node, ahead
+#            of the pause, so the paused-cluster window doesn't include
+#            package download/install time. Fatal on any failure - a
+#            partial install shouldn't lead to pausing production.
+#   Play 4 - takes a pgBackRest backup of the running old cluster, also
+#            ahead of the pause (pgBackRest doesn't need Postgres stopped),
+#            so recovery from a failed pg_upgrade doesn't depend on a
+#            backup taken outside this playbook
+#   Play 5 - pauses the whole Patroni cluster so it stops reacting to
+#            services being stopped/started out from under it
+#   Play 6 - runs pg_upgrade on the leader in place - the one part of the
+#            whole procedure where writes are unavailable
+#   Play 7 - rebuilds every replica from scratch against the new leader via
+#            patronictl reinit, one at a time by default
+#   Play 8 - resumes the cluster and shows the final state
+#
+# Expected variables (see roles/postgres_major_upgrade/defaults/main.yml):
+#   postgres_major_upgrade_enabled: true|false
+#   postgres_major_upgrade_old_version / postgres_major_upgrade_new_version
+#   postgres_major_upgrade_mode: copy|link (default link - no spare disk for
+#     a second full copy of the cluster; see defaults/main.yml for the
+#     rollback trade-off this implies)
+#   postgres_major_upgrade_backup_confirmed: must be explicitly set true in
+#     link mode - the role refuses to run pg_upgrade otherwise. A backup is
+#     taken automatically either way (Play 4); this only acknowledges that
+#     recovering from it in link mode is a manual pgBackRest restore, not
+#     an automatic rollback (see roles/postgres_major_upgrade/tasks/rollback.yml)
+#   postgres_major_upgrade_pgbackrest_stanza / _backup_type: passed to the
+#     pgBackRest backup in Play 4
+#   postgres_major_upgrade_replica_serial: how many replicas to rebuild at once
+#   patroni_api_scheme: http or https, defaults to http
+#   patroni_api_port: defaults to 8008
+#   patroni_api_host: optional per-host override for the API listener IP
+#   patronictl_bin / patroni_config_file / patroni_scope: used directly by
+#     the pause/resume plays below, before the role's own defaults apply -
+#     set these in group_vars if they differ from the role's defaults.
+
+# -------------------------------------------------------------------
+# Play 1 - Discovery runs on each host in the environment all group
+# -------------------------------------------------------------------
+- name: Discover Patroni role on each environment host
+  hosts: all
+  gather_facts: true
+  become: false
+
+  tasks:
+    - name: Set Patroni API discovery URL
+      ansible.builtin.set_fact:
+        patroni_api_url: >-
+          {{ patroni_api_scheme | default('http') }}://{{ patroni_api_host | default(ansible_default_ipv4.address) }}:{{ patroni_api_port | default(8008) }}/patroni
+      when: postgres_major_upgrade_enabled | bool
+
+    - name: Query Patroni API locally from each node
+      ansible.builtin.uri:
+        url: "{{ patroni_api_url }}"
+        method: GET
+        return_content: true
+        validate_certs: false
+        use_proxy: false
+        status_code: 200
+        timeout: 10
+      register: patroni_api_result
+      when: postgres_major_upgrade_enabled | bool
+
+    - name: Store Patroni discovery facts on each host
+      ansible.builtin.set_fact:
+        patroni_discovered: true
+        patroni_role: "{{ patroni_api_result.json.role | default('unknown') }}"
+        patroni_state: "{{ patroni_api_result.json.state | default('unknown') }}"
+      when: postgres_major_upgrade_enabled | bool
+
+    - name: Show discovered Patroni role
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          role: "{{ patroni_role }}"
+          state: "{{ patroni_state }}"
+      when: postgres_major_upgrade_enabled | bool
+
+
+# -------------------------------------------------------------------
+# Play 2 - Build in-memory leader/replica groups from hostvars
+# -------------------------------------------------------------------
+- name: Build in-memory Patroni major upgrade inventory
+  hosts: localhost
+  gather_facts: false
+  become: false
+
+  tasks:
+    - name: Fail if any all-group host was not discovered
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].patroni_discovered | default(false) | bool
+          - hostvars[item].patroni_role | default('unknown') != 'unknown'
+        fail_msg: "Patroni discovery failed or returned unknown role for {{ item }}"
+      loop: "{{ groups['all'] }}"
+      when: postgres_major_upgrade_enabled | bool
+
+    - name: Add current leader to leader group
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups:
+          - patroni_leader
+        patroni_role: "{{ hostvars[item].patroni_role }}"
+      loop: "{{ groups['all'] }}"
+      when:
+        - postgres_major_upgrade_enabled | bool
+        - hostvars[item].patroni_role in ['leader', 'primary', 'master']
+
+    - name: Add replicas to replica group
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups:
+          - patroni_replicas
+        patroni_role: "{{ hostvars[item].patroni_role }}"
+      loop: "{{ groups['all'] }}"
+      when:
+        - postgres_major_upgrade_enabled | bool
+        - hostvars[item].patroni_role in ['replica', 'standby_leader']
+
+    - name: Fail if there isn't exactly one leader
+      ansible.builtin.assert:
+        that:
+          - groups['patroni_leader'] | default([]) | length == 1
+        fail_msg: >-
+          Expected exactly one Patroni leader, found
+          {{ groups['patroni_leader'] | default([]) | length }}:
+          {{ groups['patroni_leader'] | default([]) }}
+      when: postgres_major_upgrade_enabled | bool
+
+    - name: Show leader and replica groups
+      ansible.builtin.debug:
+        msg:
+          leader: "{{ groups['patroni_leader'] | default([]) }}"
+          replicas: "{{ groups['patroni_replicas'] | default([]) }}"
+      when: postgres_major_upgrade_enabled | bool
+
+
+# -------------------------------------------------------------------
+# Play 3 - Install the new major version package on every node
+# -------------------------------------------------------------------
+- name: Install new PostgreSQL major version package on every node
+  hosts: patroni_leader:patroni_replicas
+  gather_facts: true
+  become: true
+  # A failed install doesn't touch the running old cluster - nothing to
+  # roll back - but a partial install (succeeds on some nodes, fails on
+  # others) should stop the whole run before the cluster is even paused,
+  # rather than pausing production against a topology we already know is
+  # broken.
+  any_errors_fatal: true
+
+  tasks:
+    - name: Run postgres_major_upgrade package install tasks
+      ansible.builtin.import_role:
+        name: postgres_major_upgrade
+        tasks_from: install_package
+      when: postgres_major_upgrade_enabled | bool
+
+
+# -------------------------------------------------------------------
+# Play 4 - Take a pre-upgrade pgBackRest backup of the running cluster
+# -------------------------------------------------------------------
+- name: Take pre-upgrade pgBackRest backup
+  hosts: patroni_leader
+  gather_facts: false
+  become: true
+  # No backup, no upgrade - stop before anything is paused or touched.
+  any_errors_fatal: true
+
+  tasks:
+    - name: Run postgres_major_upgrade backup tasks
+      ansible.builtin.import_role:
+        name: postgres_major_upgrade
+        tasks_from: backup
+      when: postgres_major_upgrade_enabled | bool
+
+
+# -------------------------------------------------------------------
+# Play 5 - Pause the Patroni cluster for the duration of the upgrade
+# -------------------------------------------------------------------
+- name: Pause Patroni cluster before major upgrade
+  hosts: patroni_leader
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Run patronictl pause
+      ansible.builtin.command:
+        cmd: >-
+          {{ patronictl_bin | default('/opt/patroni/venv/bin/patronictl') }}
+          -c {{ patroni_config_file | default('/etc/patroni/patroni.yml') }}
+          pause {{ patroni_scope | default('postgres-cluster') }} --wait
+      changed_when: true
+      when: postgres_major_upgrade_enabled | bool
+
+
+# -------------------------------------------------------------------
+# Play 6 - Upgrade the leader (pg_upgrade in place, write downtime here)
+# -------------------------------------------------------------------
+- name: Upgrade Patroni leader to the new major version
+  hosts: patroni_leader
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+
+  tasks:
+    - name: Show host being upgraded
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          patroni_role: "{{ patroni_role | default('unknown') }}"
+
+    - name: Run PostgreSQL major upgrade role
+      ansible.builtin.import_role:
+        name: postgres_major_upgrade
+      when: postgres_major_upgrade_enabled | bool
+
+
+# -------------------------------------------------------------------
+# Play 7 - Rebuild each replica against the upgraded leader
+# -------------------------------------------------------------------
+- name: Rebuild Patroni replicas on the new major version
+  hosts: patroni_replicas
+  gather_facts: true
+  become: true
+  serial: "{{ postgres_major_upgrade_replica_serial | default(1) }}"
+  # A replica that fails and rolls back should stop the whole major
+  # upgrade rather than let Ansible carry on rebuilding the rest with one
+  # member already known to be broken.
+  any_errors_fatal: true
+
+  tasks:
+    - name: Show host being rebuilt
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          patroni_role: "{{ patroni_role | default('unknown') }}"
+
+    - name: Run PostgreSQL major upgrade role
+      ansible.builtin.import_role:
+        name: postgres_major_upgrade
+      when: postgres_major_upgrade_enabled | bool
+
+
+# -------------------------------------------------------------------
+# Play 8 - Resume the cluster and show the final state
+# -------------------------------------------------------------------
+- name: Resume Patroni cluster and show final state
+  hosts: patroni_leader
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Run patronictl resume
+      ansible.builtin.command:
+        cmd: >-
+          {{ patronictl_bin | default('/opt/patroni/venv/bin/patronictl') }}
+          -c {{ patroni_config_file | default('/etc/patroni/patroni.yml') }}
+          resume {{ patroni_scope | default('postgres-cluster') }}
+      changed_when: true
+      when: postgres_major_upgrade_enabled | bool
+
+    - name: Show final cluster state
+      ansible.builtin.command:
+        cmd: >-
+          {{ patronictl_bin | default('/opt/patroni/venv/bin/patronictl') }}
+          -c {{ patroni_config_file | default('/etc/patroni/patroni.yml') }}
+          list {{ patroni_scope | default('postgres-cluster') }}
+      changed_when: false
+      register: postgres_major_upgrade_final_state
+      when: postgres_major_upgrade_enabled | bool
+
+    - name: Display final cluster state
+      ansible.builtin.debug:
+        var: postgres_major_upgrade_final_state.stdout_lines
+      when: postgres_major_upgrade_enabled | bool

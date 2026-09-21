@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  role_name: postgres_major_upgrade
+  description: >-
+    Patroni-aware PostgreSQL major version upgrade: pg_upgrade on the
+    leader, then replica rebuild via patronictl reinit
+  min_ansible_version: "2.14"
+
+dependencies: []
