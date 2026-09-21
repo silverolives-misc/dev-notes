@@ -31,9 +31,9 @@
 # Expected variables (see roles/postgres_major_upgrade/defaults/main.yml):
 #   postgres_major_upgrade_enabled: true|false
 #   postgres_major_upgrade_old_version / postgres_major_upgrade_new_version
-#   postgres_major_upgrade_mode: copy|link (default link - no spare disk for
-#     a second full copy of the cluster; see defaults/main.yml for the
-#     rollback trade-off this implies)
+#   postgres_major_upgrade_mode: copy|clone|link (default copy - automatic
+#     rollback, but write downtime scales with cluster size; see
+#     defaults/main.yml for the trade-offs of each)
 #   postgres_major_upgrade_backup_confirmed: must be explicitly set true in
 #     link mode - the role refuses to run pg_upgrade otherwise. A backup is
 #     taken automatically either way (Play 4); this only acknowledges that
@@ -151,7 +151,7 @@
 
 
 # -------------------------------------------------------------------
-# Play 3 - Install the new major version package on every node
+# Play 3 - Check disk space, then install the new major version package
 # -------------------------------------------------------------------
 - name: Install new PostgreSQL major version package on every node
   hosts: patroni_leader:patroni_replicas
@@ -165,6 +165,12 @@
   any_errors_fatal: true
 
   tasks:
+    - name: Run postgres_major_upgrade disk space preflight
+      ansible.builtin.import_role:
+        name: postgres_major_upgrade
+        tasks_from: check_disk_space
+      when: postgres_major_upgrade_enabled | bool
+
     - name: Run postgres_major_upgrade package install tasks
       ansible.builtin.import_role:
         name: postgres_major_upgrade

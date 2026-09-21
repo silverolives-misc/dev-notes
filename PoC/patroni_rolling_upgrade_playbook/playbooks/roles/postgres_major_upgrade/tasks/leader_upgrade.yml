@@ -86,14 +86,6 @@
         expected_data_dir: "{{ postgres_major_upgrade_new_data_dir }}"
         expected_major_version: "{{ postgres_major_upgrade_new_version }}"
 
-    - name: Run pg_upgrade's generated analyze script against the new cluster
-      ansible.builtin.command:
-        cmd: ./analyze_new_cluster.sh
-        chdir: "{{ postgres_major_upgrade_work_dir }}"
-      become: true
-      become_user: "{{ postgres_major_upgrade_os_user }}"
-      changed_when: true
-
   rescue:
     - name: Roll back leader to the old data directory (copy mode only)
       ansible.builtin.include_tasks: rollback.yml
@@ -108,6 +100,18 @@
           rolled back to PostgreSQL {{ postgres_major_upgrade_old_version }}
           ({{ postgres_major_upgrade_old_data_dir }}). The cluster remains
           paused. Investigate before retrying - no replicas were touched.
+
+# Deliberately outside the block/rescue above: by this point the new
+# leader is healthy and accepting writes, so a failure here must not
+# trigger a rollback that reverts to the old data directory and discards
+# everything written since. Planner stats are not worth losing data over.
+- name: Run pg_upgrade's generated analyze script against the new cluster
+  ansible.builtin.command:
+    cmd: ./analyze_new_cluster.sh
+    chdir: "{{ postgres_major_upgrade_work_dir }}"
+  become: true
+  become_user: "{{ postgres_major_upgrade_os_user }}"
+  changed_when: true
 
 - name: Show pg_upgrade output
   ansible.builtin.debug:

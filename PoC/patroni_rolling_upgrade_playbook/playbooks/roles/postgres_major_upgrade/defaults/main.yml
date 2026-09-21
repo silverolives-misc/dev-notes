@@ -30,16 +30,26 @@ postgres_major_upgrade_old_version: "15"
 postgres_major_upgrade_new_version: "16"
 
 # -- pg_upgrade behaviour ---------------------------------------------------
-# link (default here) hard-links old and new data files together instead
-# of copying them, so it needs negligible extra disk and is much faster -
-# required when there isn't spare disk for a full second copy of the
-# cluster. The trade-off: once the new cluster starts, the old data
-# directory shares inodes with it and can no longer be trusted as a
-# rollback target (see tasks/rollback.yml, which refuses to run in this
-# mode). Set to copy instead only on a host with ~2x the cluster's disk
-# free, where you want "revert bin_dir/data_dir and restart" as a rollback
-# path with no data loss.
-postgres_major_upgrade_mode: link  # copy | link
+#   copy  (default) writes a full second copy of the data. The old data
+#         directory stays fully independent, so a failed upgrade rolls
+#         back automatically (tasks/rollback.yml: point patroni.yml back
+#         at the old bin_dir/data_dir and restart). Write downtime scales
+#         with cluster size, since the copy happens while the leader is
+#         stopped. Needs ~2x disk (checked by tasks/check_disk_space.yml).
+#   clone uses filesystem reflinks (pg_upgrade --clone, PG12+): near-
+#         instant like link, but the old directory stays independent like
+#         copy. Only works if the data filesystem supports reflink
+#         (e.g. XFS created with reflink=1 - check `xfs_info <mount>`);
+#         pg_upgrade --check fails cleanly if it doesn't.
+#   link  hard-links files: near-instant and ~no extra disk, but once the
+#         new cluster starts the old directory shares inodes with it and
+#         is no longer a rollback target. tasks/rollback.yml refuses to
+#         run and recovery is a manual pgBackRest restore.
+postgres_major_upgrade_mode: copy  # copy | clone | link
+
+# Free space required on the data filesystem, as a multiple of the old
+# data directory's current size, for the copy / replica-rebuild paths.
+postgres_major_upgrade_disk_headroom_factor: 1.1
 
 # link mode has no automatic rollback path - a pre-upgrade pgBackRest
 # backup is taken automatically (tasks/backup.yml, before the cluster is

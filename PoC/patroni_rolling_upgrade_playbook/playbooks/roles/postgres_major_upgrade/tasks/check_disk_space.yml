@@ -1,0 +1,44 @@
+---
+# Confirms there's room for a second full copy of the data directory
+# before anything is touched. Needed on:
+#   - the leader in copy mode (pg_upgrade writes a full second copy
+#     alongside the old one)
+#   - every replica in any mode (patronictl reinit basebackups a fresh
+#     copy into the new data_dir while the old one stays in place so
+#     rollback.yml can still point back at it)
+# Skipped for the leader in link/clone mode, which need ~no extra space.
+#
+# Assumes new_data_dir is on the same filesystem as old_data_dir.
+
+- name: Load OS-family specific bin_dir/data_dir/package spec
+  ansible.builtin.include_vars: "{{ ansible_os_family }}.yml"
+
+- name: Measure old data directory size and free space on its filesystem
+  when: >-
+    not (patroni_role in ['leader', 'primary', 'master']
+         and postgres_major_upgrade_mode in ['link', 'clone'])
+  block:
+    - name: Measure old data directory size
+      ansible.builtin.command:
+        cmd: "du -sb {{ postgres_major_upgrade_old_data_dir }}"
+      register: postgres_major_upgrade_du
+      changed_when: false
+
+    - name: Measure free space on the data filesystem
+      ansible.builtin.command:
+        cmd: "df --output=avail -B1 {{ postgres_major_upgrade_old_data_dir }}"
+      register: postgres_major_upgrade_df
+      changed_when: false
+
+    - name: Fail if there isn't room for a second copy plus headroom
+      ansible.builtin.assert:
+        that:
+          - >-
+            (postgres_major_upgrade_df.stdout_lines[-1] | trim | int)
+            >= ((postgres_major_upgrade_du.stdout.split()[0] | int)
+                * (postgres_major_upgrade_disk_headroom_factor | float))
+        fail_msg: >-
+          {{ inventory_hostname }}: {{ postgres_major_upgrade_df.stdout_lines[-1] | trim }}
+          bytes free on the filesystem holding {{ postgres_major_upgrade_old_data_dir }},
+          need {{ postgres_major_upgrade_disk_headroom_factor }}x its current size
+          ({{ postgres_major_upgrade_du.stdout.split()[0] }} bytes) for a second copy.

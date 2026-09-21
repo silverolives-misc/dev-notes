@@ -7,7 +7,8 @@
 # Requires `expected_roles` from the caller (same convention as
 # postgres_minor_upgrade).
 #
-# Only automatic in copy mode. link mode hard-links the old and new data
+# Automatic in copy and clone modes (old data directory stays independent).
+# link mode hard-links the old and new data
 # files together, so once pg_upgrade has run and the new cluster has been
 # started, the old data directory is no longer independent and this task
 # won't touch it. A pre-upgrade pgBackRest backup was already taken
