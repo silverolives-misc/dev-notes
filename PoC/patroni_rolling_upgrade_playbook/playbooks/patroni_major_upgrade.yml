@@ -12,10 +12,12 @@
 #            (same pattern as patroni_rolling_upgrade.yml)
 #   Play 2 - localhost builds patroni_leader (1 host) and patroni_replicas
 #            in-memory groups from hostvars
-#   Play 3 - installs the new major version's package on every node, ahead
-#            of the pause, so the paused-cluster window doesn't include
-#            package download/install time. Fatal on any failure - a
-#            partial install shouldn't lead to pausing production.
+#   Play 3 - preflight on every node (transfer mode supported, enough disk
+#            space), installs the new major version's package, then runs
+#            pg_upgrade --check with the chosen mode on the leader - all
+#            ahead of the pause, so a failure leaves production untouched
+#            and the paused-cluster window excludes install time. Fatal on
+#            any failure.
 #   Play 4 - takes a pgBackRest backup of the running old cluster, also
 #            ahead of the pause (pgBackRest doesn't need Postgres stopped),
 #            so recovery from a failed pg_upgrade doesn't depend on a
@@ -31,9 +33,10 @@
 # Expected variables (see roles/postgres_major_upgrade/defaults/main.yml):
 #   postgres_major_upgrade_enabled: true|false
 #   postgres_major_upgrade_old_version / postgres_major_upgrade_new_version
-#   postgres_major_upgrade_mode: copy|clone|link (default copy - automatic
-#     rollback, but write downtime scales with cluster size; see
-#     defaults/main.yml for the trade-offs of each)
+#   postgres_major_upgrade_mode: clone|copy|link (default clone - near-
+#     instant with automatic rollback, if the filesystem supports reflinks;
+#     Play 3 verifies that and disk space up front. See defaults/main.yml
+#     for the trade-offs of each)
 #   postgres_major_upgrade_backup_confirmed: must be explicitly set true in
 #     link mode - the role refuses to run pg_upgrade otherwise. A backup is
 #     taken automatically either way (Play 4); this only acknowledges that
@@ -151,7 +154,7 @@
 
 
 # -------------------------------------------------------------------
-# Play 3 - Check disk space, then install the new major version package
+# Play 3 - Preflight checks, install the new package, verify pg_upgrade works
 # -------------------------------------------------------------------
 - name: Install new PostgreSQL major version package on every node
   hosts: patroni_leader:patroni_replicas
@@ -168,7 +171,7 @@
     - name: Run postgres_major_upgrade disk space preflight
       ansible.builtin.import_role:
         name: postgres_major_upgrade
-        tasks_from: check_disk_space
+        tasks_from: preflight
       when: postgres_major_upgrade_enabled | bool
 
     - name: Run postgres_major_upgrade package install tasks
@@ -176,6 +179,18 @@
         name: postgres_major_upgrade
         tasks_from: install_package
       when: postgres_major_upgrade_enabled | bool
+
+    # Needs the new binaries installed above. Authoritative test that the
+    # configured transfer mode (clone/copy/link) actually works and the old
+    # and new clusters are compatible - run here so a failure leaves
+    # production untouched, not paused.
+    - name: Run pg_upgrade feasibility check on the leader
+      ansible.builtin.import_role:
+        name: postgres_major_upgrade
+        tasks_from: precheck_pg_upgrade
+      when:
+        - postgres_major_upgrade_enabled | bool
+        - patroni_role in ['leader', 'primary', 'master']
 
 
 # -------------------------------------------------------------------

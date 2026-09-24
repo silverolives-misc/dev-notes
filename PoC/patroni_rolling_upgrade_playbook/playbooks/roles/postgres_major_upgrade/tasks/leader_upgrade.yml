@@ -5,41 +5,8 @@
 # leader has to be upgraded in place first, before any replica can be
 # rebuilt against it.
 
-- name: Create pg_upgrade working directory
-  ansible.builtin.file:
-    path: "{{ postgres_major_upgrade_work_dir }}"
-    state: directory
-    owner: "{{ postgres_major_upgrade_os_user }}"
-    group: "{{ postgres_major_upgrade_os_group }}"
-    mode: "0700"
-
-- name: Check whether new data directory is already initialized
-  ansible.builtin.stat:
-    path: "{{ postgres_major_upgrade_new_data_dir }}/PG_VERSION"
-  register: postgres_major_upgrade_new_datadir_check
-
-- name: Initialize new data directory with initdb
-  ansible.builtin.command:
-    cmd: >-
-      {{ postgres_major_upgrade_new_bin_dir }}/initdb
-      -D {{ postgres_major_upgrade_new_data_dir }}
-      {{ postgres_major_upgrade_initdb_options }}
-  become: true
-  become_user: "{{ postgres_major_upgrade_os_user }}"
-  when: not postgres_major_upgrade_new_datadir_check.stat.exists
-
-- name: Run pg_upgrade --check against the running old cluster
-  ansible.builtin.command:
-    cmd: >-
-      {{ postgres_major_upgrade_new_bin_dir }}/pg_upgrade
-      --check
-      -b {{ postgres_major_upgrade_old_bin_dir }} -B {{ postgres_major_upgrade_new_bin_dir }}
-      -d {{ postgres_major_upgrade_old_data_dir }} -D {{ postgres_major_upgrade_new_data_dir }}
-  args:
-    chdir: "{{ postgres_major_upgrade_work_dir }}"
-  become: true
-  become_user: "{{ postgres_major_upgrade_os_user }}"
-  changed_when: false
+- name: Re-run pg_upgrade feasibility check right before the stop
+  ansible.builtin.include_tasks: precheck_pg_upgrade.yml
 
 - name: Upgrade leader, rolling back if it fails to come back healthy
   block:

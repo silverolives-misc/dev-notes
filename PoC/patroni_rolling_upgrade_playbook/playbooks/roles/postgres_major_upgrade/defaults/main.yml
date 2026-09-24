@@ -30,22 +30,23 @@ postgres_major_upgrade_old_version: "15"
 postgres_major_upgrade_new_version: "16"
 
 # -- pg_upgrade behaviour ---------------------------------------------------
-#   copy  (default) writes a full second copy of the data. The old data
-#         directory stays fully independent, so a failed upgrade rolls
-#         back automatically (tasks/rollback.yml: point patroni.yml back
-#         at the old bin_dir/data_dir and restart). Write downtime scales
-#         with cluster size, since the copy happens while the leader is
-#         stopped. Needs ~2x disk (checked by tasks/check_disk_space.yml).
-#   clone uses filesystem reflinks (pg_upgrade --clone, PG12+): near-
-#         instant like link, but the old directory stays independent like
-#         copy. Only works if the data filesystem supports reflink
-#         (e.g. XFS created with reflink=1 - check `xfs_info <mount>`);
-#         pg_upgrade --check fails cleanly if it doesn't.
+#   clone (default) uses filesystem reflinks (pg_upgrade --clone, PG12+):
+#         near-instant like link, but the old directory stays independent
+#         like copy, so a failed upgrade rolls back automatically
+#         (tasks/rollback.yml: point patroni.yml back at the old
+#         bin_dir/data_dir and restart). Needs the data filesystem to
+#         support reflinks (e.g. XFS created with reflink=1) and old/new
+#         dirs on the same filesystem - tasks/preflight.yml tests
+#         both up front and fails before anything is paused if not.
+#   copy  writes a full second copy of the data. Same automatic rollback,
+#         works on any filesystem, but write downtime scales with cluster
+#         size since the copy happens while the leader is stopped. Needs
+#         ~2x disk (also checked by tasks/preflight.yml).
 #   link  hard-links files: near-instant and ~no extra disk, but once the
 #         new cluster starts the old directory shares inodes with it and
 #         is no longer a rollback target. tasks/rollback.yml refuses to
 #         run and recovery is a manual pgBackRest restore.
-postgres_major_upgrade_mode: copy  # copy | clone | link
+postgres_major_upgrade_mode: clone  # clone | copy | link
 
 # Free space required on the data filesystem, as a multiple of the old
 # data directory's current size, for the copy / replica-rebuild paths.

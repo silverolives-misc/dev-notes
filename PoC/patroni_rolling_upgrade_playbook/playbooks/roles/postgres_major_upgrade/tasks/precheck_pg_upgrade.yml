@@ -1,0 +1,54 @@
+---
+# The authoritative feasibility test for whichever transfer mode is
+# configured: pg_upgrade --check --<mode> itself. For clone/link it
+# verifies reflink/hard-link support between the two data directories; for
+# every mode it verifies the old and new clusters are compatible (locale,
+# encoding, checksums, extensions, ...). Non-destructive and safe against
+# the running old cluster.
+#
+# Run twice, from different places, on purpose:
+#   - Play 3 (before anything is paused), so an unsupported mode or
+#     incompatible cluster fails while production is untouched rather than
+#     leaving the cluster paused
+#   - leader_upgrade.yml, right before Patroni is stopped, in case anything
+#     changed in between (backup, pause)
+# Idempotent: initdb is skipped once the new data directory exists.
+
+- name: Load OS-family specific bin_dir/data_dir/package spec
+  ansible.builtin.include_vars: "{{ ansible_os_family }}.yml"
+
+- name: Create pg_upgrade working directory
+  ansible.builtin.file:
+    path: "{{ postgres_major_upgrade_work_dir }}"
+    state: directory
+    owner: "{{ postgres_major_upgrade_os_user }}"
+    group: "{{ postgres_major_upgrade_os_group }}"
+    mode: "0700"
+
+- name: Check whether new data directory is already initialized
+  ansible.builtin.stat:
+    path: "{{ postgres_major_upgrade_new_data_dir }}/PG_VERSION"
+  register: postgres_major_upgrade_new_datadir_check
+
+- name: Initialize new data directory with initdb
+  ansible.builtin.command:
+    cmd: >-
+      {{ postgres_major_upgrade_new_bin_dir }}/initdb
+      -D {{ postgres_major_upgrade_new_data_dir }}
+      {{ postgres_major_upgrade_initdb_options }}
+  become: true
+  become_user: "{{ postgres_major_upgrade_os_user }}"
+  when: not postgres_major_upgrade_new_datadir_check.stat.exists
+
+- name: Run pg_upgrade --check with the configured transfer mode
+  ansible.builtin.command:
+    cmd: >-
+      {{ postgres_major_upgrade_new_bin_dir }}/pg_upgrade
+      --check --{{ postgres_major_upgrade_mode }}
+      -b {{ postgres_major_upgrade_old_bin_dir }} -B {{ postgres_major_upgrade_new_bin_dir }}
+      -d {{ postgres_major_upgrade_old_data_dir }} -D {{ postgres_major_upgrade_new_data_dir }}
+  args:
+    chdir: "{{ postgres_major_upgrade_work_dir }}"
+  become: true
+  become_user: "{{ postgres_major_upgrade_os_user }}"
+  changed_when: false
