@@ -38,18 +38,18 @@
   when: "'Lag in MB' in patroni_member_final_state"
 
 - name: Confirm the running data directory reports the expected major version
-  ansible.builtin.command: "cat {{ expected_data_dir }}/PG_VERSION"
+  ansible.builtin.slurp:
+    src: "{{ expected_data_dir }}/PG_VERSION"
   register: postgres_major_upgrade_pgversion_file
-  changed_when: false
   when: expected_data_dir is defined and expected_major_version is defined
 
 - name: Assert running PostgreSQL major version matches what we expect at this point
   ansible.builtin.assert:
     that:
-      - postgres_major_upgrade_pgversion_file.stdout | trim == expected_major_version | string
+      - postgres_major_upgrade_pgversion_file.content | b64decode | trim == expected_major_version | string
     fail_msg: >-
       {{ patroni_member_name }} data directory {{ expected_data_dir }} reports
-      PG_VERSION {{ postgres_major_upgrade_pgversion_file.stdout | trim }},
+      PG_VERSION {{ postgres_major_upgrade_pgversion_file.content | b64decode | trim }},
       expected {{ expected_major_version }}
   when: expected_data_dir is defined and expected_major_version is defined
 

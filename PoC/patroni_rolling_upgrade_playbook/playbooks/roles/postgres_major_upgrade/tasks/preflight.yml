@@ -1,8 +1,8 @@
 ---
 # Preflight, run on every node before anything is paused, installed or
 # touched. Checks against the filesystem the NEW data directory will
-# actually land on (nearest existing parent, since it isn't created yet),
-# not just wherever the old one lives:
+# actually land on (looked up from gathered mount facts, so it doesn't need
+# to exist yet), not just wherever the old one lives:
 #   - link/clone (leader): old and new must be on the same filesystem, and
 #     for clone the filesystem must support reflinks
 #   - copy (leader) and every replica in any mode: enough free space for a
@@ -22,42 +22,45 @@
       '{{ postgres_major_upgrade_mode }}'), and clone needs a target of
       PostgreSQL 12 or newer.
 
-- name: Find nearest existing parent of the new data directory
-  ansible.builtin.shell: |
-    p="{{ postgres_major_upgrade_new_data_dir }}"
-    while [ ! -e "$p" ]; do p=$(dirname "$p"); done
-    echo "$p"
-  register: postgres_major_upgrade_new_fs_path
-  changed_when: false
+- name: Look up the filesystems holding the old and new data directories
+  ansible.builtin.set_fact:
+    postgres_major_upgrade_mounts: >-
+      {%- set ns = namespace(old=none, new=none) -%}
+      {%- for m in ansible_facts.mounts -%}
+      {%- set mp = m.mount.rstrip('/') ~ '/' -%}
+      {%- if (postgres_major_upgrade_old_data_dir ~ '/').startswith(mp)
+             and (ns.old is none or m.mount | length > ns.old.mount | length) -%}{%- set ns.old = m -%}{%- endif -%}
+      {%- if (postgres_major_upgrade_new_data_dir ~ '/').startswith(mp)
+             and (ns.new is none or m.mount | length > ns.new.mount | length) -%}{%- set ns.new = m -%}{%- endif -%}
+      {%- endfor -%}
+      {{ {'old': ns.old, 'new': ns.new} }}
 
-- name: Stat old data directory and the new data directory's filesystem
-  ansible.builtin.stat:
-    path: "{{ item }}"
-  loop:
-    - "{{ postgres_major_upgrade_old_data_dir }}"
-    - "{{ postgres_major_upgrade_new_fs_path.stdout }}"
-  register: postgres_major_upgrade_fs_stat
+- name: Fail if either data directory could not be matched to a mounted filesystem
+  ansible.builtin.assert:
+    that:
+      - postgres_major_upgrade_mounts.old is not none
+      - postgres_major_upgrade_mounts.new is not none
+    fail_msg: >-
+      {{ inventory_hostname }}: no mount in ansible_facts.mounts covers
+      {{ postgres_major_upgrade_old_data_dir }} or
+      {{ postgres_major_upgrade_new_data_dir }} - was fact gathering skipped?
 
+# No native module measures a directory tree's size without listing every
+# file in it, which is far slower than du on a real data directory.
 - name: Measure old data directory size
   ansible.builtin.command:
-    cmd: "du -sb {{ postgres_major_upgrade_old_data_dir }}"
+    argv: [du, -sb, "{{ postgres_major_upgrade_old_data_dir }}"]
   register: postgres_major_upgrade_du
-  changed_when: false
-
-- name: Measure free space where the new data directory will be created
-  ansible.builtin.command:
-    cmd: "df --output=avail -B1 {{ postgres_major_upgrade_new_fs_path.stdout }}"
-  register: postgres_major_upgrade_df
   changed_when: false
 
 - name: Set preflight facts
   ansible.builtin.set_fact:
     postgres_major_upgrade_is_leader: "{{ patroni_role in ['leader', 'primary', 'master'] }}"
     postgres_major_upgrade_same_fs: >-
-      {{ postgres_major_upgrade_fs_stat.results[0].stat.dev
-         == postgres_major_upgrade_fs_stat.results[1].stat.dev }}
+      {{ postgres_major_upgrade_mounts.old.mount == postgres_major_upgrade_mounts.new.mount }}
     postgres_major_upgrade_old_bytes: "{{ postgres_major_upgrade_du.stdout.split()[0] | int }}"
-    postgres_major_upgrade_free_bytes: "{{ postgres_major_upgrade_df.stdout_lines[-1] | trim | int }}"
+    postgres_major_upgrade_free_bytes: "{{ postgres_major_upgrade_mounts.new.size_available | int }}"
+    postgres_major_upgrade_test_dir: "{{ postgres_major_upgrade_mounts.new.mount }}"
 
 - name: Require old and new data directories on the same filesystem (link/clone)
   ansible.builtin.assert:
@@ -66,21 +69,33 @@
     fail_msg: >-
       {{ inventory_hostname }}: {{ postgres_major_upgrade_new_data_dir }} would be
       created on a different filesystem from {{ postgres_major_upgrade_old_data_dir }}
-      ({{ postgres_major_upgrade_new_fs_path.stdout }}), but
+      (new: {{ postgres_major_upgrade_mounts.new.mount }}, old: {{ postgres_major_upgrade_mounts.old.mount }}), but
       postgres_major_upgrade_mode={{ postgres_major_upgrade_mode }} needs both on
       the same one. Mount/point the new data directory correctly, or use copy.
   when:
     - postgres_major_upgrade_is_leader | bool
     - postgres_major_upgrade_mode in ['link', 'clone']
 
+# Tests the destination filesystem's mount point (always exists, always on
+# the right filesystem) with a throwaway file removed straight after.
 - name: Test that the filesystem supports reflinks (clone)
-  ansible.builtin.shell: |
-    dest="{{ postgres_major_upgrade_new_fs_path.stdout }}/.reflink_check.$$"
-    trap 'rm -f "$dest"' EXIT
-    cp --reflink=always "{{ postgres_major_upgrade_old_data_dir }}/global/pg_control" "$dest"
+  ansible.builtin.command:
+    argv:
+      - cp
+      - --reflink=always
+      - "{{ postgres_major_upgrade_old_data_dir }}/global/pg_control"
+      - "{{ postgres_major_upgrade_test_dir }}/.pg_upgrade_reflink_check"
   register: postgres_major_upgrade_reflink_test
   changed_when: false
-  failed_when: false
+  ignore_errors: true
+  when:
+    - postgres_major_upgrade_is_leader | bool
+    - postgres_major_upgrade_mode == 'clone'
+
+- name: Remove reflink test file
+  ansible.builtin.file:
+    path: "{{ postgres_major_upgrade_test_dir }}/.pg_upgrade_reflink_check"
+    state: absent
   when:
     - postgres_major_upgrade_is_leader | bool
     - postgres_major_upgrade_mode == 'clone'
@@ -88,10 +103,10 @@
 - name: Fail if reflinks are not supported
   ansible.builtin.assert:
     that:
-      - postgres_major_upgrade_reflink_test.rc == 0
+      - postgres_major_upgrade_reflink_test is succeeded
     fail_msg: >-
       {{ inventory_hostname }}: reflink copy failed on
-      {{ postgres_major_upgrade_new_fs_path.stdout }}
+      {{ postgres_major_upgrade_test_dir }}
       ({{ postgres_major_upgrade_reflink_test.stderr | default('') | trim }}).
       This filesystem can't do pg_upgrade --clone (XFS needs reflink=1, see
       `xfs_info <mount>`). Use postgres_major_upgrade_mode=copy instead.
@@ -100,13 +115,20 @@
     - postgres_major_upgrade_mode == 'clone'
 
 - name: Test that hard links work between the old and new locations (link)
-  ansible.builtin.shell: |
-    dest="{{ postgres_major_upgrade_new_fs_path.stdout }}/.hardlink_check.$$"
-    trap 'rm -f "$dest"' EXIT
-    ln "{{ postgres_major_upgrade_old_data_dir }}/global/pg_control" "$dest"
+  ansible.builtin.file:
+    src: "{{ postgres_major_upgrade_old_data_dir }}/global/pg_control"
+    dest: "{{ postgres_major_upgrade_test_dir }}/.pg_upgrade_hardlink_check"
+    state: hard
   register: postgres_major_upgrade_hardlink_test
-  changed_when: false
-  failed_when: false
+  ignore_errors: true
+  when:
+    - postgres_major_upgrade_is_leader | bool
+    - postgres_major_upgrade_mode == 'link'
+
+- name: Remove hard link test file
+  ansible.builtin.file:
+    path: "{{ postgres_major_upgrade_test_dir }}/.pg_upgrade_hardlink_check"
+    state: absent
   when:
     - postgres_major_upgrade_is_leader | bool
     - postgres_major_upgrade_mode == 'link'
@@ -114,11 +136,11 @@
 - name: Fail if hard links are not possible
   ansible.builtin.assert:
     that:
-      - postgres_major_upgrade_hardlink_test.rc == 0
+      - postgres_major_upgrade_hardlink_test is succeeded
     fail_msg: >-
       {{ inventory_hostname }}: hard link from {{ postgres_major_upgrade_old_data_dir }}
-      to {{ postgres_major_upgrade_new_fs_path.stdout }} failed
-      ({{ postgres_major_upgrade_hardlink_test.stderr | default('') | trim }}).
+      to {{ postgres_major_upgrade_test_dir }} failed
+      ({{ postgres_major_upgrade_hardlink_test.msg | default('') }}).
       Use postgres_major_upgrade_mode=copy instead.
   when:
     - postgres_major_upgrade_is_leader | bool
