@@ -1,0 +1,31 @@
+---
+# Safety net only: prepare.yml normally installed the package on every node
+# already, so this is a no-op. It keeps the upgrade phase from failing
+# opaquely if that phase was skipped.
+- name: Check whether new major version binaries are already installed
+  ansible.builtin.stat:
+    path: "{{ postgres_major_upgrade_new_bin_dir }}/pg_upgrade"
+  register: postgres_major_upgrade_new_binary_check
+
+- name: Install new major version package if it is not there yet
+  ansible.builtin.include_tasks: install_package.yml
+  when: not postgres_major_upgrade_new_binary_check.stat.exists
+
+# Backup first, then pause: the backup runs against the live old cluster
+# with no extra downtime, and a failed backup stops everything before the
+# cluster is paused.
+- name: Back up the running cluster before touching it
+  ansible.builtin.include_tasks: backup.yml
+  when: patroni_role in ['leader', 'primary', 'master']
+
+- name: Pause Patroni cluster
+  ansible.builtin.include_tasks: pause.yml
+  when: patroni_role in ['leader', 'primary', 'master']
+
+- name: Run leader upgrade sequence (pg_upgrade in place)
+  ansible.builtin.include_tasks: leader_upgrade.yml
+  when: patroni_role in ['leader', 'primary', 'master']
+
+- name: Run replica rebuild sequence
+  ansible.builtin.include_tasks: replica_upgrade.yml
+  when: patroni_role in ['replica', 'standby_leader']

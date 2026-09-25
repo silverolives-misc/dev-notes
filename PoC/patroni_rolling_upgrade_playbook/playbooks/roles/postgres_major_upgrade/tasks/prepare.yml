@@ -1,0 +1,30 @@
+---
+# Runs on every node in parallel, before the backup, the pause or any
+# change to the running cluster, so any failure here leaves production
+# untouched (not paused).
+
+- name: Refuse to proceed without acknowledging manual-restore-only recovery in link mode
+  ansible.builtin.assert:
+    that:
+      - postgres_major_upgrade_backup_confirmed | bool
+    fail_msg: >-
+      postgres_major_upgrade_backup_confirmed is false. A pre-upgrade
+      pgBackRest backup is taken automatically (tasks/backup.yml), but in
+      link mode recovering from a failed pg_upgrade means a manual
+      pgBackRest restore (see tasks/rollback.yml) - there is no automatic
+      revert. Pass -e postgres_major_upgrade_backup_confirmed=true to
+      acknowledge this and proceed.
+  when: postgres_major_upgrade_mode == 'link'
+
+- name: Check the transfer mode is supported and there is enough disk space
+  ansible.builtin.include_tasks: preflight.yml
+
+- name: Install the new major version package
+  ansible.builtin.include_tasks: install_package.yml
+
+# Needs the new binaries installed above. Authoritative test that the
+# configured transfer mode (clone/copy/link) works and the old and new
+# clusters are compatible.
+- name: Check pg_upgrade will work on the leader
+  ansible.builtin.include_tasks: precheck_pg_upgrade.yml
+  when: patroni_role in ['leader', 'primary', 'master']

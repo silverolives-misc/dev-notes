@@ -1,0 +1,31 @@
+---
+# Leader only: resumes Patroni once every replica has been rebuilt, and
+# shows the final cluster state.
+
+- name: Resume Patroni cluster
+  ansible.builtin.command:
+    argv:
+      - "{{ patronictl_bin }}"
+      - -c
+      - "{{ patroni_config_file }}"
+      - resume
+      - "{{ patroni_scope }}"
+  changed_when: true
+  when: patroni_role in ['leader', 'primary', 'master']
+
+- name: Get final cluster state
+  ansible.builtin.command:
+    argv:
+      - "{{ patronictl_bin }}"
+      - -c
+      - "{{ patroni_config_file }}"
+      - list
+      - "{{ patroni_scope }}"
+  changed_when: false
+  register: postgres_major_upgrade_final_state
+  when: patroni_role in ['leader', 'primary', 'master']
+
+- name: Show final cluster state
+  ansible.builtin.debug:
+    var: postgres_major_upgrade_final_state.stdout_lines
+  when: patroni_role in ['leader', 'primary', 'master']

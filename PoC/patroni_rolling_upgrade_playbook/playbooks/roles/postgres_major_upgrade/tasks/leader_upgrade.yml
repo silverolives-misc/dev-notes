@@ -1,6 +1,6 @@
 ---
 # Runs once, against the leader, with the whole Patroni cluster already
-# paused by the calling playbook. Unlike a minor upgrade there's nothing to
+# paused (pause.yml). Unlike a minor upgrade there's nothing to
 # switch away from here: pg_upgrade only runs against the primary, so the
 # leader has to be upgraded in place first, before any replica can be
 # rebuilt against it.

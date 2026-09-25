@@ -1,0 +1,15 @@
+---
+# Pauses Patroni cluster-wide so it stops reacting (failover, restarts) to
+# services being stopped/started and data directories being swapped out
+# from under it. Resumed by finish.yml. Run against the leader only.
+
+- name: Pause Patroni cluster
+  ansible.builtin.command:
+    argv:
+      - "{{ patronictl_bin }}"
+      - -c
+      - "{{ patroni_config_file }}"
+      - pause
+      - "{{ patroni_scope }}"
+      - --wait
+  changed_when: true

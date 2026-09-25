@@ -1,17 +1,18 @@
 ---
 # postgres_major_upgrade defaults
 #
-# Called once per host from the patroni_major_upgrade playbook's leader/
-# replica groups, same pattern as postgres_minor_upgrade. Expects
-# patroni_role as a hostvar set by the calling playbook's add_host tasks.
+# Called once per host per phase (postgres_major_upgrade_phase: prepare |
+# upgrade | finish) by the patroni_major_upgrade playbook, which only
+# decides host ordering. Expects patroni_role as a hostvar set by the
+# calling playbook's add_host tasks.
 #
 # A major version upgrade replaces the on-disk cluster format, so unlike
 # the minor-upgrade role this is NOT a like-for-like binary swap:
 #   - the leader runs pg_upgrade once, into a brand new data directory
 #   - every replica is rebuilt from scratch against the upgraded leader
 #     (patronictl reinit), not patched in place
-# The whole cluster is paused (patronictl pause) by the calling playbook
-# for the duration so Patroni doesn't attempt failover/restarts while
+# The whole cluster is paused (patronictl pause, tasks/pause.yml) for the
+# duration so Patroni doesn't attempt failover/restarts while
 # nodes are being taken apart and rebuilt out from under it.
 
 # -- Patroni service / CLI ------------------------------------------------

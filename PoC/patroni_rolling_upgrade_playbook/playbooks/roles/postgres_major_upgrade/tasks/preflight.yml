@@ -22,6 +22,16 @@
       '{{ postgres_major_upgrade_mode }}'), and clone needs a target of
       PostgreSQL 12 or newer.
 
+# Refreshes only the mount facts (size_available etc.) at the moment of the
+# check, rather than relying on whatever the play's earlier gather_facts
+# saw, without paying for a full hardware gather.
+- name: Refresh filesystem facts
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - mounts
+
 - name: Look up the filesystems holding the old and new data directories
   ansible.builtin.set_fact:
     postgres_major_upgrade_mounts: >-
@@ -43,7 +53,7 @@
     fail_msg: >-
       {{ inventory_hostname }}: no mount in ansible_facts.mounts covers
       {{ postgres_major_upgrade_old_data_dir }} or
-      {{ postgres_major_upgrade_new_data_dir }} - was fact gathering skipped?
+      {{ postgres_major_upgrade_new_data_dir }} - did the mounts subset of setup return nothing?
 
 # No native module measures a directory tree's size without listing every
 # file in it, which is far slower than du on a real data directory.

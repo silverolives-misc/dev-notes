@@ -7,7 +7,7 @@
 # the running old cluster.
 #
 # Run twice, from different places, on purpose:
-#   - Play 3 (before anything is paused), so an unsupported mode or
+#   - the prepare phase (before anything is paused), so an unsupported mode or
 #     incompatible cluster fails while production is untouched rather than
 #     leaving the cluster paused
 #   - leader_upgrade.yml, right before Patroni is stopped, in case anything
