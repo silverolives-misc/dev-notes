@@ -54,11 +54,11 @@
       changed_when: true
 
     - name: Wait for replica to rejoin cluster healthy on the new version
-      ansible.builtin.include_tasks: wait_for_healthy.yml
+      ansible.builtin.include_role:
+        name: patroni_common
+        tasks_from: wait_for_healthy
       vars:
-        expected_roles:
-          - Replica
-          - Sync Standby
+        expected_roles: "{{ patronictl_replica_roles }}"
         expected_data_dir: "{{ postgres_major_upgrade_new_data_dir }}"
         expected_major_version: "{{ postgres_major_upgrade_new_version }}"
 
@@ -66,9 +66,7 @@
     - name: Roll back replica to the old data directory
       ansible.builtin.include_tasks: rollback.yml
       vars:
-        expected_roles:
-          - Replica
-          - Sync Standby
+        expected_roles: "{{ patronictl_replica_roles }}"
 
     - name: Fail after successful rollback to halt the major upgrade
       ansible.builtin.fail:

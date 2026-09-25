@@ -1,0 +1,45 @@
+---
+# patroni_common defaults
+#
+# Loaded by postgres_minor_upgrade and postgres_major_upgrade through their
+# meta dependency, so both see the same names. A dependent role's own
+# defaults win over these, so a role can override a value (e.g. the health
+# check tuning) without touching the other. Inventory vars win over both.
+
+# -- Patroni service / CLI ------------------------------------------------
+# pip-installed Patroni lives in a virtualenv. patronictl's shebang already
+# points at the venv's own python, so calling it by its venv path runs it
+# correctly without needing to `source activate` first.
+patroni_service_name: patroni
+patroni_venv_path: /opt/patroni/venv
+patronictl_bin: "{{ patroni_venv_path }}/bin/patronictl"
+patroni_config_file: /etc/patroni/patroni.yml
+patroni_scope: postgres-cluster
+
+# patronictl with the config flag, for callers that append a subcommand.
+patronictl_cmd: "{{ patronictl_bin }} -c {{ patroni_config_file }}"
+
+# Name Patroni knows this member by. Override in host_vars if it differs
+# from the Ansible inventory_hostname (e.g. short hostname vs FQDN).
+patroni_member_name: "{{ inventory_hostname }}"
+
+# -- Role names -------------------------------------------------------------
+# Values of the `patroni_role` hostvar (from the Patroni REST API), which
+# the calling playbook sets during discovery.
+patroni_leader_roles: [leader, primary, master]
+patroni_replica_roles: [replica, standby_leader]
+patroni_known_roles: "{{ patroni_leader_roles + patroni_replica_roles }}"
+
+# Values of the Role column in `patronictl list` (a different vocabulary).
+patronictl_leader_roles: [Leader]
+patronictl_replica_roles: [Replica, Sync Standby]
+
+# -- Health check tuning ----------------------------------------------------
+# How long to wait for a node to rejoin the cluster as healthy after its
+# Patroni service restarts. postgres_major_upgrade raises these, since a
+# replica rebuilt from scratch takes far longer than a minor-upgrade restart.
+postgres_upgrade_health_check_retries: 30
+postgres_upgrade_health_check_delay: 10
+
+# Maximum acceptable replication lag (bytes) once a node reports "running".
+postgres_upgrade_max_lag_bytes: 16777216

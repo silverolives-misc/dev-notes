@@ -1,0 +1,9 @@
+---
+- name: Assert patroni_role hostvar was provided by the calling playbook
+  ansible.builtin.assert:
+    that:
+      - patroni_role is defined
+      - patroni_role in patroni_known_roles
+    fail_msg: >-
+      patroni_role must be set to a known Patroni role by the discovery play
+      (got: {{ patroni_role | default('undefined') }})

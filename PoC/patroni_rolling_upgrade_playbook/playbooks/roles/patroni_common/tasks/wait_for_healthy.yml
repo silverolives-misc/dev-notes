@@ -1,14 +1,15 @@
 ---
 # Requires from the caller:
 #   expected_roles         - list of patronictl Role strings to wait for
+#                            (see patronictl_leader_roles / _replica_roles)
+# Optional, checked only when both are given (major upgrade):
 #   expected_data_dir       - data directory that should be backing the
-#                             running instance once it's healthy (new_data_dir
-#                             on the forward path, old_data_dir on rollback)
+#                             running instance once it's healthy
 #   expected_major_version - PG_VERSION content expected in that directory
 
 - name: Poll cluster state until this node is running with an expected role
   ansible.builtin.command:
-    cmd: "{{ patronictl_bin }} -c {{ patroni_config_file }} list {{ patroni_scope }} -f json"
+    cmd: "{{ patronictl_cmd }} list {{ patroni_scope }} -f json"
   register: patroni_cluster_health
   until: >-
     (patroni_cluster_health.stdout | from_json
@@ -40,16 +41,16 @@
 - name: Confirm the running data directory reports the expected major version
   ansible.builtin.slurp:
     src: "{{ expected_data_dir }}/PG_VERSION"
-  register: postgres_major_upgrade_pgversion_file
+  register: patroni_pgversion_file
   when: expected_data_dir is defined and expected_major_version is defined
 
 - name: Assert running PostgreSQL major version matches what we expect at this point
   ansible.builtin.assert:
     that:
-      - postgres_major_upgrade_pgversion_file.content | b64decode | trim == expected_major_version | string
+      - patroni_pgversion_file.content | b64decode | trim == expected_major_version | string
     fail_msg: >-
       {{ patroni_member_name }} data directory {{ expected_data_dir }} reports
-      PG_VERSION {{ postgres_major_upgrade_pgversion_file.content | b64decode | trim }},
+      PG_VERSION {{ patroni_pgversion_file.content | b64decode | trim }},
       expected {{ expected_major_version }}
   when: expected_data_dir is defined and expected_major_version is defined
 

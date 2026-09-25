@@ -6,4 +6,5 @@ galaxy_info:
     leader, then replica rebuild via patronictl reinit
   min_ansible_version: "2.14"
 
-dependencies: []
+dependencies:
+  - role: patroni_common

@@ -56,8 +56,9 @@
     state: started
 
 - name: Wait for node to rejoin cluster healthy on the old version
-  ansible.builtin.include_tasks: wait_for_healthy.yml
+  ansible.builtin.include_role:
+    name: patroni_common
+    tasks_from: wait_for_healthy
   vars:
-    expected_roles: "{{ expected_roles }}"
     expected_data_dir: "{{ postgres_major_upgrade_old_data_dir }}"
     expected_major_version: "{{ postgres_major_upgrade_old_version }}"

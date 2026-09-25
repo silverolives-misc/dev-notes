@@ -24,20 +24,13 @@
     name: "{{ patroni_service_name }}"
     state: stopped
 
-- name: Install PostgreSQL package (Debian)
-  ansible.builtin.apt:
-    name: "{{ postgres_minor_upgrade_install_spec }}"
-    state: "{{ postgres_minor_upgrade_install_state | default('latest') }}"
-  when: ansible_os_family == 'Debian'
-  register: postgres_package_install_result
-
-- name: Install PostgreSQL package (RedHat)
-  ansible.builtin.yum:
-    name: "{{ postgres_minor_upgrade_install_spec }}"
-    state: "{{ postgres_minor_upgrade_install_state | default('latest') }}"
-    allow_downgrade: true
-  when: ansible_os_family == 'RedHat'
-  register: postgres_package_install_result
+- name: Install PostgreSQL package
+  ansible.builtin.include_role:
+    name: patroni_common
+    tasks_from: install_package
+  vars:
+    patroni_pkg_spec: "{{ postgres_minor_upgrade_install_spec }}"
+    patroni_pkg_state: "{{ postgres_minor_upgrade_install_state | default('latest') }}"
 
 - name: Start Patroni service on {{ patroni_member_name }}
   ansible.builtin.systemd:

@@ -15,7 +15,7 @@
   ansible.builtin.set_fact:
     patroni_switchover_candidate: >-
       {{ (patroni_cluster_before.stdout | from_json
-          | selectattr('Role', 'in', ['Replica', 'Sync Standby'])
+          | selectattr('Role', 'in', patronictl_replica_roles)
           | selectattr('State', 'equalto', 'running')
           | map(attribute='Member') | list | first) | default('', true) }}
 
@@ -40,7 +40,7 @@
   until: >-
     (patroni_cluster_after_switchover.stdout | from_json
       | selectattr('Member', 'equalto', patroni_member_name)
-      | map(attribute='Role') | list | first | default('')) in ['Replica', 'Sync Standby']
+      | map(attribute='Role') | list | first | default('')) in patronictl_replica_roles
   retries: "{{ postgres_upgrade_switchover_wait_retries }}"
   delay: "{{ postgres_upgrade_switchover_wait_delay }}"
   changed_when: false
@@ -54,19 +54,17 @@
         postgres_minor_upgrade_install_state: "{{ 'present' if postgres_minor_upgrade_package_version else 'latest' }}"
 
     - name: Wait for former leader to rejoin cluster as healthy replica
-      ansible.builtin.include_tasks: wait_for_healthy.yml
+      ansible.builtin.include_role:
+        name: patroni_common
+        tasks_from: wait_for_healthy
       vars:
-        expected_roles:
-          - Replica
-          - Sync Standby
+        expected_roles: "{{ patronictl_replica_roles }}"
 
   rescue:
     - name: Roll back former leader to its pre-upgrade package version
       ansible.builtin.include_tasks: rollback.yml
       vars:
-        expected_roles:
-          - Replica
-          - Sync Standby
+        expected_roles: "{{ patronictl_replica_roles }}"
 
     - name: Fail after successful rollback to halt the rolling upgrade
       ansible.builtin.fail:

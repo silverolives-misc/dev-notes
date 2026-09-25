@@ -11,7 +11,7 @@
       - resume
       - "{{ patroni_scope }}"
   changed_when: true
-  when: patroni_role in ['leader', 'primary', 'master']
+  when: patroni_role in patroni_leader_roles
 
 - name: Get final cluster state
   ansible.builtin.command:
@@ -23,9 +23,9 @@
       - "{{ patroni_scope }}"
   changed_when: false
   register: postgres_major_upgrade_final_state
-  when: patroni_role in ['leader', 'primary', 'master']
+  when: patroni_role in patroni_leader_roles
 
 - name: Show final cluster state
   ansible.builtin.debug:
     var: postgres_major_upgrade_final_state.stdout_lines
-  when: patroni_role in ['leader', 'primary', 'master']
+  when: patroni_role in patroni_leader_roles

@@ -27,4 +27,4 @@
 # clusters are compatible.
 - name: Check pg_upgrade will work on the leader
   ansible.builtin.include_tasks: precheck_pg_upgrade.yml
-  when: patroni_role in ['leader', 'primary', 'master']
+  when: patroni_role in patroni_leader_roles

@@ -15,20 +15,14 @@
 - name: Load OS-family specific bin_dir/data_dir/package spec
   ansible.builtin.include_vars: "{{ ansible_os_family }}.yml"
 
-- name: Install new PostgreSQL major version package (Debian)
-  ansible.builtin.apt:
-    name: "{{ postgres_major_upgrade_new_package }}"
-    state: present
-    update_cache: true
-  when: ansible_os_family == 'Debian'
-  register: postgres_major_upgrade_package_install_result
-
-- name: Install new PostgreSQL major version package (RedHat)
-  ansible.builtin.yum:
-    name: "{{ postgres_major_upgrade_new_package }}"
-    state: present
-  when: ansible_os_family == 'RedHat'
-  register: postgres_major_upgrade_package_install_result
+- name: Install new PostgreSQL major version package
+  ansible.builtin.include_role:
+    name: patroni_common
+    tasks_from: install_package
+  vars:
+    patroni_pkg_spec: "{{ postgres_major_upgrade_new_package }}"
+    patroni_pkg_state: present
+    patroni_pkg_update_cache: true
 
 - name: Confirm pg_upgrade binary is present after install
   ansible.builtin.stat:

@@ -1,0 +1,29 @@
+---
+# Installs one PostgreSQL package with the OS's package manager.
+#
+# Requires from the caller:
+#   patroni_pkg_spec        - exact "name" (or OS-specific pinned
+#                             "name=version" / "name-version") to install
+# Optional:
+#   patroni_pkg_state        - present (default) or latest
+#   patroni_pkg_update_cache - refresh the apt cache first (default false)
+#
+# allow_downgrade is passed unconditionally on RedHat: it's a no-op for
+# state=latest and for present-but-newer, and it's what makes a rollback's
+# present-but-older install actually downgrade instead of being a no-op.
+
+- name: Install PostgreSQL package (Debian)
+  ansible.builtin.apt:
+    name: "{{ patroni_pkg_spec }}"
+    state: "{{ patroni_pkg_state | default('present') }}"
+    update_cache: "{{ patroni_pkg_update_cache | default(false) }}"
+  when: ansible_os_family == 'Debian'
+  register: patroni_pkg_install_result
+
+- name: Install PostgreSQL package (RedHat)
+  ansible.builtin.yum:
+    name: "{{ patroni_pkg_spec }}"
+    state: "{{ patroni_pkg_state | default('present') }}"
+    allow_downgrade: true
+  when: ansible_os_family == 'RedHat'
+  register: patroni_pkg_install_result

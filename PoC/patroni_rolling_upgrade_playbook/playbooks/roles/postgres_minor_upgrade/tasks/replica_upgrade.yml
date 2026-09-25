@@ -8,19 +8,17 @@
         postgres_minor_upgrade_install_state: "{{ 'present' if postgres_minor_upgrade_package_version else 'latest' }}"
 
     - name: Wait for replica to rejoin cluster as healthy
-      ansible.builtin.include_tasks: wait_for_healthy.yml
+      ansible.builtin.include_role:
+        name: patroni_common
+        tasks_from: wait_for_healthy
       vars:
-        expected_roles:
-          - Replica
-          - Sync Standby
+        expected_roles: "{{ patronictl_replica_roles }}"
 
   rescue:
     - name: Roll back replica to its pre-upgrade package version
       ansible.builtin.include_tasks: rollback.yml
       vars:
-        expected_roles:
-          - Replica
-          - Sync Standby
+        expected_roles: "{{ patronictl_replica_roles }}"
 
     - name: Fail after successful rollback to halt the rolling upgrade
       ansible.builtin.fail:

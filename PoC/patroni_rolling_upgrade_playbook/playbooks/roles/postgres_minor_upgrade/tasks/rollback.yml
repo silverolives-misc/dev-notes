@@ -22,6 +22,6 @@
     postgres_minor_upgrade_install_state: present
 
 - name: Wait for rolled-back node to rejoin cluster as healthy
-  ansible.builtin.include_tasks: wait_for_healthy.yml
-  vars:
-    expected_roles: "{{ expected_roles }}"
+  ansible.builtin.include_role:
+    name: patroni_common
+    tasks_from: wait_for_healthy

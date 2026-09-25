@@ -21,13 +21,9 @@
       (got: {{ postgres_major_upgrade_phase | default('undefined') }})
 
 - name: Assert patroni_role hostvar was provided by the calling playbook
-  ansible.builtin.assert:
-    that:
-      - patroni_role is defined
-      - patroni_role in ['leader', 'primary', 'master', 'replica', 'standby_leader']
-    fail_msg: >-
-      patroni_role must be set to a known Patroni role by the discovery play
-      (got: {{ patroni_role | default('undefined') }})
+  ansible.builtin.include_role:
+    name: patroni_common
+    tasks_from: assert_patroni_role
 
 - name: Assert old and new version are set and different
   ansible.builtin.assert:

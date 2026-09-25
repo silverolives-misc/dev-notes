@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  role_name: patroni_common
+  description: >-
+    Variables and tasks shared by postgres_minor_upgrade and
+    postgres_major_upgrade (loaded through their meta dependency)
+  min_ansible_version: "2.14"
+
+dependencies: []

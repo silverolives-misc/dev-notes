@@ -2,7 +2,7 @@
 # postgres_major_upgrade defaults
 #
 # Called once per host per phase (postgres_major_upgrade_phase: prepare |
-# upgrade | finish) by the patroni_major_upgrade playbook, which only
+# upgrade | finish) by the patroni_rolling_upgrade playbook, which only
 # decides host ordering. Expects patroni_role as a hostvar set by the
 # calling playbook's add_host tasks.
 #
@@ -15,13 +15,8 @@
 # duration so Patroni doesn't attempt failover/restarts while
 # nodes are being taken apart and rebuilt out from under it.
 
-# -- Patroni service / CLI ------------------------------------------------
-patroni_service_name: patroni
-patroni_venv_path: /opt/patroni/venv
-patronictl_bin: "{{ patroni_venv_path }}/bin/patronictl"
-patroni_config_file: /etc/patroni/patroni.yml
-patroni_scope: postgres-cluster
-patroni_member_name: "{{ inventory_hostname }}"
+# Patroni service/CLI names, role names and health-check defaults come from
+# patroni_common (meta dependency); override them in inventory or below.
 
 # -- Versions being upgraded between ---------------------------------------
 # Both required. Used to build the default bin_dir/data_dir/package names
@@ -91,7 +86,6 @@ postgres_major_upgrade_replica_serial: 1
 
 # -- Health check tuning ----------------------------------------------------
 # Rebuilding a replica from scratch takes much longer than a minor-upgrade
-# restart, so these defaults are more generous than postgres_minor_upgrade's.
+# restart, so these are more generous than patroni_common's defaults.
 postgres_upgrade_health_check_retries: 60
 postgres_upgrade_health_check_delay: 15
-postgres_upgrade_max_lag_bytes: 16777216

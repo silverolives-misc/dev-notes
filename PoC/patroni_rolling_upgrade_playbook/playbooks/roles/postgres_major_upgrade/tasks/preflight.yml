@@ -65,7 +65,7 @@
 
 - name: Set preflight facts
   ansible.builtin.set_fact:
-    postgres_major_upgrade_is_leader: "{{ patroni_role in ['leader', 'primary', 'master'] }}"
+    postgres_major_upgrade_is_leader: "{{ patroni_role in patroni_leader_roles }}"
     postgres_major_upgrade_same_fs: >-
       {{ postgres_major_upgrade_mounts.old.mount == postgres_major_upgrade_mounts.new.mount }}
     postgres_major_upgrade_old_bytes: "{{ postgres_major_upgrade_du.stdout.split()[0] | int }}"
