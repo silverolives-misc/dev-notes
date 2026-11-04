@@ -1,0 +1,16 @@
+---
+# ------------------------------------------------------------------------------
+# jira_api defaults
+# Connection settings (jira_url, jira_user, jira_token, jira_auth_type) are
+# defined in group_vars/all/main.yml.
+# ------------------------------------------------------------------------------
+
+# Hide request/response bodies (they carry the auth header). Set false to debug.
+jira_no_log: true
+
+# Bearer header for Data Center PATs; basic auth is passed via url_username
+_jira_headers: >-
+  {{
+    {'Accept': 'application/json'}
+    | combine({'Authorization': 'Bearer ' ~ jira_token} if jira_auth_type == 'bearer' else {})
+  }}

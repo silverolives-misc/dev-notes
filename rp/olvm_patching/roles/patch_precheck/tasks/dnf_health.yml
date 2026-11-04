@@ -1,0 +1,53 @@
+---
+# ------------------------------------------------------------------------------
+# patch_precheck : dnf_health
+# The package manager must be idle and the RPM database consistent, or the
+# update can fail half-applied.
+# ------------------------------------------------------------------------------
+
+- name: "Pre-check | Check no other package manager is running"
+  ansible.builtin.command:
+    argv: [pgrep, -l, -x, "(dnf|yum|rpm|dnf-automatic)"]
+  register: _pc_busy
+  changed_when: false
+  failed_when: false
+
+- name: "Pre-check | Record busy package manager"
+  ansible.builtin.set_fact:
+    _pc_reasons: "{{ _pc_reasons + ['package manager busy: ' ~ (_pc_busy.stdout_lines | join(', '))] }}"
+  when: _pc_busy.rc == 0
+
+# Reports broken dependencies, duplicate packages and obsoleted-but-installed
+# packages from the RPM database
+- name: "Pre-check | Check RPM database consistency"
+  ansible.builtin.command:
+    argv: [dnf, -q, check]
+  register: _pc_dnfcheck
+  changed_when: false
+  failed_when: false
+  when: _pc_busy.rc != 0
+
+- name: "Pre-check | Record RPM database problems"
+  ansible.builtin.set_fact:
+    _pc_reasons: >-
+      {{ _pc_reasons + ['dnf check: ' ~ ((_pc_dnfcheck.stdout_lines + _pc_dnfcheck.stderr_lines)[:5] | join(' | '))] }}
+  when:
+    - _pc_dnfcheck is not skipped
+    - _pc_dnfcheck.rc != 0 or _pc_dnfcheck.stdout | trim | length > 0
+
+# A host that patches itself on a timer changes outside the change process and
+# can make this run's pre-check stale
+- name: "Pre-check | Check for automatic updates"
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, dnf-automatic.timer, dnf-automatic-install.timer]
+  register: _pc_auto
+  changed_when: false
+  failed_when: false
+
+- name: "Pre-check | Record automatic updates"
+  vars:
+    _msg: "dnf-automatic timer enabled — host may patch itself outside change control"
+  ansible.builtin.set_fact:
+    _pc_reasons:  "{{ _pc_reasons  + ([_msg] if precheck_fail_on_dnf_automatic | bool else []) }}"
+    _pc_warnings: "{{ _pc_warnings + ([] if precheck_fail_on_dnf_automatic | bool else [_msg]) }}"
+  when: "'enabled' in _pc_auto.stdout_lines"

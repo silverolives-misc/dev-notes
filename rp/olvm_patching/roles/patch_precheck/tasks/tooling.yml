@@ -1,0 +1,36 @@
+---
+# ------------------------------------------------------------------------------
+# patch_precheck : tooling
+# qemu-guest-agent (consistent snapshots), needs-restarting (conditional
+# reboot) and grubby (post-reboot kernel check).
+# ------------------------------------------------------------------------------
+
+- name: "Pre-check | Check qemu-guest-agent"
+  ansible.builtin.command:
+    argv: [systemctl, is-active, qemu-guest-agent]
+  register: _pc_qga
+  changed_when: false
+  failed_when: false
+
+- name: "Pre-check | Record guest agent state"
+  vars:
+    _msg: "qemu-guest-agent not running — snapshot will not be filesystem-consistent"
+  ansible.builtin.set_fact:
+    _pc_reasons:  "{{ _pc_reasons  + ([_msg] if precheck_require_guest_agent | bool else []) }}"
+    _pc_warnings: "{{ _pc_warnings + ([] if precheck_require_guest_agent | bool else [_msg]) }}"
+  when: _pc_qga.rc != 0
+
+- name: "Pre-check | Check helper binaries"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /usr/bin/needs-restarting
+    - /usr/sbin/grubby
+  register: _pc_bins
+
+- name: "Pre-check | Warn on missing helpers"
+  ansible.builtin.set_fact:
+    _pc_warnings: "{{ _pc_warnings + [item.item ~ ' missing — ' ~ ('conditional reboot will always reboot' if 'needs-restarting' in item.item else 'post-reboot kernel check skipped')] }}"
+  loop: "{{ _pc_bins.results | rejectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"

@@ -1,0 +1,119 @@
+---
+# ------------------------------------------------------------------------------
+# olvm_snapshot : preflight                    runs once on localhost, before 6
+#
+# Storage is checked for ALL targets together: many VMs snapshotted on one
+# storage domain grow together. A domain that runs out of space pauses every
+# VM on it, so this is far stricter than the per-VM checks.
+#
+#   1. Disks per target VM
+#   2. Block VMs with disks a snapshot cannot cover (direct LUN, shareable)
+#   3. Expected snapshot growth per storage domain =
+#        sum(actual disk size of target VMs on it) × olvm_snapshot_growth_pct
+#   4. Block every target on a domain that would drop below
+#        olvm_storage_min_free_pct  or  olvm_storage_min_free_gb
+#
+# Input:  _preflight_targets (inventory hostnames)
+# Output: olvm_preflight_block  { host: reason }  — blocked hosts are not snapshotted
+# VERIFY: disk search "vm_names=" and the disk / storage domain attribute names
+# against the OLVM version in use, on the first phase 1 run.
+# ------------------------------------------------------------------------------
+
+- name: "Preflight | Read storage domains"
+  ovirt.ovirt.ovirt_storage_domain_info:
+    auth: "{{ ovirt_auth }}"
+  register: _sd_info
+
+- name: "Preflight | Read disks per target VM"
+  ovirt.ovirt.ovirt_disk_info:
+    auth:    "{{ ovirt_auth }}"
+    pattern: "vm_names={{ hostvars[item].olvm_vm_name | default(item.split('.')[0]) }}"
+  loop: "{{ _preflight_targets }}"
+  register: _disk_info
+
+- name: "Preflight | Summarise disks per VM"
+  vars:
+    _disks: "{{ item.ovirt_disks | default([]) }}"
+    _unsnap: >-
+      {{ (_disks | selectattr('storage_type', 'defined') | rejectattr('storage_type', 'equalto', 'image') | list)
+         + (_disks | selectattr('shareable', 'defined') | selectattr('shareable') | list) }}
+  ansible.builtin.set_fact:
+    _vm_disks: >-
+      {{ _vm_disks | default({}) | combine({item.item: {
+           'count':  _disks | length,
+           'unsnap': _unsnap | map(attribute='name') | unique | list,
+           'images': _disks | selectattr('storage_type', 'equalto', 'image') | rejectattr('shareable') | list,
+         }}) }}
+  loop: "{{ _disk_info.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# One row per (host, domain, bytes) for every snapshot-able disk
+- name: "Preflight | Expected snapshot growth per storage domain"
+  ansible.builtin.set_fact:
+    _sd_demand: >-
+      {%- set ns = namespace(d={}, on={}) -%}
+      {%- for host, v in _vm_disks.items() -%}
+        {%- for disk in v.images -%}
+          {%- for sd in disk.storage_domains | default([]) -%}
+            {%- set grow = ((disk.actual_size | default(0) | int) * (olvm_snapshot_growth_pct | float) / 100) | int -%}
+            {%- set ns.d = ns.d | combine({sd.id: ns.d.get(sd.id, 0) + grow}) -%}
+            {%- set ns.on = ns.on | combine({sd.id: (ns.on.get(sd.id, []) + [host]) | unique | list}) -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ {'bytes': ns.d, 'hosts': ns.on} }}
+
+- name: "Preflight | Evaluate storage domains"
+  vars:
+    _gib: 1073741824
+    _sd: "{{ _sd_info.ovirt_storage_domains | selectattr('id', 'equalto', item.key) | first | default({}) }}"
+    _avail: "{{ _sd.available | default(0) | int }}"
+    _total: "{{ (_sd.available | default(0) | int) + (_sd.used | default(0) | int) }}"
+    _after: "{{ _avail | int - item.value | int }}"
+    _after_pct: "{{ (100 * _after | int / (_total | int)) | round(1) if _total | int > 0 else 0 }}"
+    _ok: >-
+      {{ _sd | length > 0
+         and _after | int >= (olvm_storage_min_free_gb | int) * _gib
+         and _after_pct | float >= olvm_storage_min_free_pct | float }}
+  ansible.builtin.set_fact:
+    _sd_eval: >-
+      {{ _sd_eval | default({}) | combine({item.key: {
+           'name':      _sd.name | default(item.key),
+           'ok':        _ok | bool,
+           'msg':       ('storage domain ' ~ (_sd.name | default(item.key)) ~ ' not found') if _sd | length == 0 else
+                        ('storage domain ' ~ _sd.name ~ ': ' ~ (_avail | int // _gib) ~ ' GiB free, snapshots of '
+                         ~ (_sd_demand.hosts[item.key] | length) ~ ' VM(s) may grow ' ~ (item.value | int // _gib)
+                         ~ ' GiB → ' ~ (_after | int // _gib) ~ ' GiB / ' ~ _after_pct ~ '% left (min '
+                         ~ olvm_storage_min_free_gb ~ ' GiB / ' ~ olvm_storage_min_free_pct ~ '%)'),
+         }}) }}
+  loop: "{{ _sd_demand.bytes | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: "Preflight | Block hosts that cannot be safely snapshotted"
+  vars:
+    _bad_sd: "{{ (_sd_eval | default({})) | dict2items | rejectattr('value.ok') | list }}"
+  ansible.builtin.set_fact:
+    olvm_preflight_block: >-
+      {#- namespace keeps the reason list alive across the inner loop (Jinja scoping) -#}
+      {%- set ns = namespace(b={}, r=[]) -%}
+      {%- for host, v in _vm_disks.items() -%}
+        {%- set ns.r = [] -%}
+        {%- if v.count == 0 -%}{%- set ns.r = ns.r + ['no disks found for VM in OLVM'] -%}{%- endif -%}
+        {%- if v.unsnap and olvm_block_on_unsnapshottable_disks | bool -%}
+          {%- set ns.r = ns.r + ['disk(s) not covered by a snapshot (direct LUN / shareable): ' ~ (v.unsnap | join(', '))] -%}
+        {%- endif -%}
+        {%- for sd in _bad_sd if host in _sd_demand.hosts[sd.key] -%}{%- set ns.r = ns.r + [sd.value.msg] -%}{%- endfor -%}
+        {%- if ns.r -%}{%- set ns.b = ns.b | combine({host: ns.r | join('; ')}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.b }}
+
+- name: "Preflight | Storage domain summary"
+  ansible.builtin.debug:
+    msg: "{{ (_sd_eval | default({})).values() | map(attribute='msg') | list }}"
+
+- name: "Preflight | Blocked hosts"
+  ansible.builtin.debug:
+    msg: "{{ olvm_preflight_block }}"
+  when: olvm_preflight_block | length > 0

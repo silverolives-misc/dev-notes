@@ -1,0 +1,124 @@
+---
+# ------------------------------------------------------------------------------
+# aap/vars.yml — names and settings for configure_controller.yml
+# ------------------------------------------------------------------------------
+
+aap_org:        "Default"
+
+# Execution environment (see ../execution-environment.yml)
+aap_ee_name:    "EE OLVM Patching"
+aap_ee_image:   "<private-hub-host>/ee-olvm-patching:1.0.0"
+
+# Project
+aap_project:        "OLVM Patching"
+aap_scm_url:        "<git URL of this project>"
+aap_scm_branch:     "main"
+aap_scm_credential: ""            # Source Control credential name, if private
+
+# Inventory
+aap_inventory:        "Device42"
+aap_inventory_source: "Device42 – Oracle Linux"
+
+# ------------------------------------------------------------------------------
+# Secrets — Azure Key Vault
+#
+# AAP's built-in "Microsoft Azure Key Vault" lookup credential fetches each
+# secret at job launch. No secret value is stored in AAP or in this repo.
+#
+# The lookup credential authenticates with an Entra ID service principal that
+# has "Key Vault Secrets User" (RBAC) or Get on secrets (access policy).
+# Its client secret is the one bootstrap value: supply it once via the
+# AZURE_KV_CLIENT_SECRET environment variable when running this playbook.
+# If it is unset, the lookup credential must already exist.
+# ------------------------------------------------------------------------------
+aap_cred_keyvault:  "Azure Key Vault – patching"
+aap_kv_url:         "https://<vault-name>.vault.azure.net"
+aap_kv_tenant:      "<entra-tenant-id>"
+aap_kv_client_id:   "<service-principal-app-id>"
+aap_kv_cloud:       "AzureCloud"
+
+# Credential names
+aap_cred_machine:  "Oracle Linux – ansible SSH"
+aap_cred_jira:     "Jira – patching automation"
+aap_cred_device42: "Device42 – inventory"
+aap_cred_olvm:     "OLVM – patching automation"
+
+# Non-secret credential fields, set directly. Secret fields are linked to
+# Key Vault secrets in aap_credential_secrets below.
+aap_credentials:
+  - name:            "{{ aap_cred_machine }}"
+    credential_type: "Machine"
+    inputs:
+      username:        "<ssh-user>"
+      become_method:   sudo
+  - name:            "{{ aap_cred_jira }}"
+    credential_type: "Jira"
+    inputs:
+      url:             "https://<org>.atlassian.net"
+      username:        "<automation-account-email>"
+  - name:            "{{ aap_cred_device42 }}"
+    credential_type: "Device42"
+    inputs:
+      url:             "https://<device42-host>"
+      username:        "<device42-api-user>"
+  - name:            "{{ aap_cred_olvm }}"
+    credential_type: "OLVM"
+    inputs:
+      url:             "https://<olvm-engine>/ovirt-engine/api"
+      username:        "<svc-user>@internal"
+
+# credential field → Key Vault secret name
+# (secret_version "" = always the current version, so rotation in Key Vault
+# needs no AAP change)
+aap_credential_secrets:
+  - { credential: "{{ aap_cred_machine }}",  field: ssh_key_data,    secret: "patching-ssh-private-key" }
+  - { credential: "{{ aap_cred_machine }}",  field: become_password, secret: "patching-sudo-password", enabled: false }
+  - { credential: "{{ aap_cred_jira }}",     field: token,           secret: "patching-jira-api-token" }
+  - { credential: "{{ aap_cred_device42 }}", field: password,        secret: "patching-device42-password" }
+  - { credential: "{{ aap_cred_olvm }}",     field: password,        secret: "patching-olvm-password" }
+  - { credential: "{{ aap_cred_olvm }}",     field: ca_pem,          secret: "patching-olvm-ca-pem" }
+
+# Job template names
+aap_jt:
+  gate:           "Patching | 01 Change gate"
+  precheck:       "Patching | 02 Scope and pre-checks"
+  snapshot:       "Patching | 03 OLVM snapshot"
+  patch:          "Patching | 04 Patch and reboot"
+  report:         "Patching | 05 Report and Jira"
+  cleanup_dryrun: "Patching | 06 Snapshot cleanup (dry run)"
+  cleanup_delete: "Patching | 06 Snapshot cleanup (delete)"
+
+aap_job_templates:
+  - name:        "{{ aap_jt.gate }}"
+    playbook:    01_change_gate.yml
+    credentials: ["{{ aap_cred_jira }}"]
+  - name:        "{{ aap_jt.precheck }}"
+    playbook:    02_precheck.yml
+    credentials: ["{{ aap_cred_machine }}"]
+  - name:        "{{ aap_jt.snapshot }}"
+    playbook:    03_snapshot.yml
+    credentials: ["{{ aap_cred_olvm }}"]
+  - name:        "{{ aap_jt.patch }}"
+    playbook:    04_patch.yml
+    credentials: ["{{ aap_cred_machine }}"]
+    timeout:     14400
+  - name:        "{{ aap_jt.report }}"
+    playbook:    05_report.yml
+    credentials: ["{{ aap_cred_jira }}"]
+  - name:        "{{ aap_jt.cleanup_dryrun }}"
+    playbook:    06_snapshot_cleanup.yml
+    credentials: ["{{ aap_cred_olvm }}"]
+    extra_vars:  { cleanup_dry_run: true }
+  - name:        "{{ aap_jt.cleanup_delete }}"
+    playbook:    06_snapshot_cleanup.yml
+    credentials: ["{{ aap_cred_olvm }}", "{{ aap_cred_jira }}"]
+    extra_vars:  { cleanup_dry_run: false }
+
+# Workflows
+aap_wf_patching: "OS Patching"
+aap_wf_cleanup:  "OLVM Snapshot Cleanup"
+
+# Cleanup approval and schedule
+aap_cleanup_approval_timeout: 86400            # seconds; 0 = never times out
+aap_cleanup_approver_team:    ""               # AAP team allowed to approve
+aap_cleanup_rrule: "DTSTART;TZID=UTC:20261101T070000 RRULE:FREQ=DAILY;INTERVAL=1"

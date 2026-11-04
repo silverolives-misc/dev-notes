@@ -1,0 +1,23 @@
+---
+# ------------------------------------------------------------------------------
+# jira_api : transition
+# Applies a workflow transition by ID. List valid IDs for an issue with:
+#   GET {{ jira_url }}/rest/api/2/issue/<key>/transitions
+#
+# Inputs: jira_issue_key, jira_transition_id
+# ------------------------------------------------------------------------------
+
+- name: "Jira | Transition {{ jira_issue_key }} (id {{ jira_transition_id }})"
+  ansible.builtin.uri:
+    url:            "{{ jira_url }}/rest/api/2/issue/{{ jira_issue_key | urlencode }}/transitions"
+    method:         POST
+    headers:        "{{ _jira_headers }}"
+    url_username:   "{{ jira_user if jira_auth_type == 'basic' else omit }}"
+    url_password:   "{{ jira_token if jira_auth_type == 'basic' else omit }}"
+    force_basic_auth: "{{ jira_auth_type == 'basic' }}"
+    body_format:    json
+    body:
+      transition:
+        id: "{{ jira_transition_id | string }}"
+    status_code:    204
+  no_log: "{{ jira_no_log }}"

@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  role_name: patch_precheck
+  author: your_team
+  description: >
+    Per-host readiness checks before OS patching: SSH connectivity, facts,
+    supported OS, free space, privilege escalation, qemu-guest-agent and the
+    approved updates that are available. Never fails the play — every outcome
+    is recorded in patch_precheck_result for the workflow to act on.
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+
+dependencies: []

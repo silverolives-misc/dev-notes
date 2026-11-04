@@ -1,0 +1,86 @@
+---
+# ------------------------------------------------------------------------------
+# patch_precheck : filesystems
+# Per path in precheck_filesystems: free MB, % used, % inodes used, read-only.
+# A path that is not its own mount is checked as part of its parent mount.
+# ------------------------------------------------------------------------------
+
+- name: "Pre-check | Read filesystem usage"
+  ansible.builtin.command:
+    argv: [df, "--output=target,avail,pcent,ipcent", -BM, "{{ item.path }}"]
+  loop: "{{ precheck_filesystems }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: _pc_df
+  changed_when: false
+  failed_when: false
+
+- name: "Pre-check | Read mount options"
+  ansible.builtin.command:
+    argv: [findmnt, -n, -o, OPTIONS, --target, "{{ item.path }}"]
+  loop: "{{ precheck_filesystems }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: _pc_mnt
+  changed_when: false
+  failed_when: false
+
+- name: "Pre-check | Warn on paths that could not be read"
+  ansible.builtin.set_fact:
+    _pc_warnings: "{{ _pc_warnings + ['cannot read ' ~ item.item.path ~ ': ' ~ (item.stderr | default('') | trim)] }}"
+  loop: "{{ _pc_df.results | rejectattr('rc', 'equalto', 0) | list }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
+# df line: "<mount> <avail>M <use>% <iuse>%" — mount may contain spaces, so
+# parse from the right. vfat and similar report "-" for inodes.
+- name: "Pre-check | Parse filesystem usage"
+  vars:
+    _t: "{{ item.0.stdout_lines[-1].split() }}"
+  ansible.builtin.set_fact:
+    _pc_fs: >-
+      {{ _pc_fs | default([]) + [{
+           'path':      item.0.item.path,
+           'cfg':       item.0.item,
+           'mount':     _t[:-3] | join(' '),
+           'avail_mb':  _t[-3] | regex_replace('M$', '') | int,
+           'used_pct':  _t[-2] | replace('%', '') | int,
+           'inode_pct': _t[-1] | replace('%', '') | replace('-', '0') | int,
+           'ro':        'ro' in (item.1.stdout | default('') | trim).split(','),
+         }] }}
+  loop: "{{ _pc_df.results | zip(_pc_mnt.results) | list }}"
+  loop_control:
+    label: "{{ item.0.item.path }}"
+  when: item.0.rc == 0
+
+- name: "Pre-check | Check free space"
+  ansible.builtin.set_fact:
+    _pc_reasons: "{{ _pc_reasons + [item.path ~ ' (' ~ item.mount ~ '): ' ~ item.avail_mb ~ ' MB free, need ' ~ item.cfg.min_free_mb] }}"
+  loop: "{{ _pc_fs | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: item.avail_mb < item.cfg.min_free_mb | int
+
+- name: "Pre-check | Check percentage used"
+  ansible.builtin.set_fact:
+    _pc_reasons: "{{ _pc_reasons + [item.path ~ ' (' ~ item.mount ~ '): ' ~ item.used_pct ~ '% used, limit ' ~ item.cfg.max_used_pct ~ '%'] }}"
+  loop: "{{ _pc_fs | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: item.used_pct > item.cfg.max_used_pct | int
+
+- name: "Pre-check | Check inode usage"
+  ansible.builtin.set_fact:
+    _pc_reasons: "{{ _pc_reasons + [item.path ~ ' (' ~ item.mount ~ '): ' ~ item.inode_pct ~ '% inodes used, limit ' ~ item.cfg.max_inode_pct ~ '%'] }}"
+  loop: "{{ _pc_fs | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: item.inode_pct > item.cfg.max_inode_pct | int
+
+- name: "Pre-check | Check filesystems are writable"
+  ansible.builtin.set_fact:
+    _pc_reasons: "{{ _pc_reasons + [item.path ~ ' (' ~ item.mount ~ ') is mounted read-only'] }}"
+  loop: "{{ _pc_fs | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: item.ro

@@ -1,0 +1,103 @@
+---
+# ------------------------------------------------------------------------------
+# patch_precheck : main
+# Every path ends by setting patch_precheck_result — the role never leaves a
+# host failed, so one bad host cannot stop the others being assessed.
+#
+#   status: ready       updates available, all checks passed
+#           no_updates  checks passed, nothing to install — no snapshot taken
+#           failed      see reasons
+# ------------------------------------------------------------------------------
+
+- name: "Pre-check | Initialise"
+  ansible.builtin.set_fact:
+    _pc_reasons:  []
+    _pc_warnings: []
+    _pc_updates:  []
+
+# ------------------------------------------------------------------------------
+# Step 4 — connectivity (before facts: setup needs a working connection)
+# ------------------------------------------------------------------------------
+
+- name: "Pre-check | Connectivity"
+  block:
+
+    - name: "Pre-check | Wait for SSH and privilege escalation"
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ precheck_connect_timeout }}"
+
+  rescue:
+
+    - name: "Pre-check | Record unreachable host"
+      ansible.builtin.set_fact:
+        patch_precheck_result:
+          status:        failed
+          reasons:       ["unreachable: {{ ansible_failed_result.msg | default('no response') }}"]
+          warnings:      []
+          updates_count: 0
+
+    - name: "Pre-check | Stop processing unreachable host"
+      ansible.builtin.meta: end_host
+
+# ------------------------------------------------------------------------------
+# Steps 3 and 8 — facts, readiness, available updates
+# ------------------------------------------------------------------------------
+
+- name: "Pre-check | Readiness"
+  block:
+
+    - name: "Pre-check | Gather host facts"
+      ansible.builtin.setup:
+        gather_subset: ["!all", "min"]
+
+    - name: "Pre-check | Check OS is supported"
+      ansible.builtin.set_fact:
+        _pc_reasons: "{{ _pc_reasons + ['unsupported OS: ' ~ ansible_distribution ~ ' ' ~ ansible_distribution_version] }}"
+      when: >-
+        ansible_distribution not in precheck_supported_distributions
+        or ansible_distribution_major_version not in precheck_supported_major_versions
+
+    - name: "Pre-check | Filesystems — space, inodes, read-only"
+      ansible.builtin.include_tasks: filesystems.yml
+
+    - name: "Pre-check | Package manager health"
+      ansible.builtin.include_tasks: dnf_health.yml
+
+    - name: "Pre-check | Snapshot and reboot tooling"
+      ansible.builtin.include_tasks: tooling.yml
+
+    # Step 8 — only when the host is otherwise healthy
+    - name: "Pre-check | Available updates, version guard, transaction size"
+      ansible.builtin.include_tasks: updates.yml
+      when: _pc_reasons | length == 0
+
+  rescue:
+
+    - name: "Pre-check | Record unexpected failure"
+      ansible.builtin.set_fact:
+        _pc_reasons: >-
+          {{ _pc_reasons + [ansible_failed_task.name ~ ': '
+             ~ (ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')))] }}
+
+# ------------------------------------------------------------------------------
+# Record
+# ------------------------------------------------------------------------------
+
+- name: "Pre-check | Record result"
+  ansible.builtin.set_fact:
+    patch_precheck_result:
+      status: >-
+        {{ 'failed' if _pc_reasons | length > 0
+           else 'no_updates' if _pc_updates | length == 0
+           else 'ready' }}
+      reasons:       "{{ _pc_reasons }}"
+      warnings:      "{{ _pc_warnings }}"
+      os:            "{{ ansible_distribution | default('?') }} {{ ansible_distribution_version | default('') }}"
+      kernel:        "{{ ansible_kernel | default('?') }}"
+      updates_count: "{{ _pc_updates | length }}"
+      updates:       "{{ _pc_updates[:precheck_updates_list_max | int] }}"
+      transaction:   "{{ _pc_tx_summary | default('') }}"
+
+- name: "Pre-check | Result"
+  ansible.builtin.debug:
+    msg: "{{ patch_precheck_result.status | upper }} — {{ patch_precheck_result.updates_count }} update(s){{ ('; ' ~ (patch_precheck_result.reasons | join('; '))) if patch_precheck_result.reasons else '' }}"

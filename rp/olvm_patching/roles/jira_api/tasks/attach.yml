@@ -1,0 +1,23 @@
+---
+# ------------------------------------------------------------------------------
+# jira_api : attach
+# Uploads a local file (on the execution node) as an issue attachment.
+#
+# Inputs: jira_issue_key, jira_attachment_path
+# ------------------------------------------------------------------------------
+
+- name: "Jira | Attach {{ jira_attachment_path | basename }} to {{ jira_issue_key }}"
+  ansible.builtin.uri:
+    url:            "{{ jira_url }}/rest/api/2/issue/{{ jira_issue_key | urlencode }}/attachments"
+    method:         POST
+    headers:        "{{ _jira_headers | combine({'X-Atlassian-Token': 'no-check'}) }}"
+    url_username:   "{{ jira_user if jira_auth_type == 'basic' else omit }}"
+    url_password:   "{{ jira_token if jira_auth_type == 'basic' else omit }}"
+    force_basic_auth: "{{ jira_auth_type == 'basic' }}"
+    body_format:    form-multipart
+    body:
+      file:
+        filename: "{{ jira_attachment_path }}"
+        mime_type: "{{ jira_attachment_mime | default('text/html') }}"
+    status_code:    200
+  no_log: "{{ jira_no_log }}"

@@ -1,0 +1,9 @@
+---
+# Installed by AAP at project sync, and baked into the execution environment.
+# ovirt.ovirt needs the ovirt-engine-sdk-python library — see execution-environment.yml.
+collections:
+  - name: ovirt.ovirt
+    version: ">=3.2.0"
+  - name: device42.d42
+  - name: ansible.posix
+  - name: ansible.controller     # only needed by aap/configure_controller.yml

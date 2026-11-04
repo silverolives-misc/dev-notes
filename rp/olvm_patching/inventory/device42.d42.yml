@@ -1,0 +1,63 @@
+---
+# ------------------------------------------------------------------------------
+# Device42 dynamic inventory — used as an AAP inventory source (step 2).
+#
+# Plugin: device42.d42.d42 (collection device42.d42 1.2.1). Behaviour notes,
+# from the plugin source:
+#   - The file name must end in d42.yml / d42.yaml.
+#   - Credentials come from D42_URL / D42_USER / D42_PWD (injected by the
+#     "Device42" credential type).
+#   - Every sync runs 7 DOQL queries over the WHOLE estate (no server-side
+#     filter), each with a 30 s HTTP timeout.
+#   - Errors are printed, not raised: a failed or timed-out query gives an
+#     empty or partial inventory and the sync still reports success.
+#   - Every device field becomes a hostvar prefixed d42_ (d42_tags,
+#     d42_custom_fields, d42_os, d42_ip_addresses, d42_service_level, ...).
+#   - d42_custom_fields is a LIST of {key, value}, not a dict.
+#   - ansible_host is set to the first IP Device42 returns (order not
+#     guaranteed), overridden below where a preferred subnet is set.
+#
+# VERIFY after the first sync: the d42_tags format (comma-separated string
+# vs list) and the custom field key name, by inspecting one host's variables.
+# ------------------------------------------------------------------------------
+plugin: device42.d42.d42
+ssl_check: true
+
+# Default true turns "web01.example.com" into "web01_example_com" and
+# "app-db-01" into "app_db_01". Keep real names so they match Jira, OLVM and DNS.
+clean_device_name: false
+
+# Fail the sync on a bad compose / keyed_groups expression instead of skipping
+strict: true
+
+compose:
+  # Normalise tags to a list whether Device42 returns a string or a list
+  d42_tag_list: >-
+    (d42_tags if (d42_tags is sequence and d42_tags is not string)
+     else (d42_tags | default('', true) | string).split(','))
+    | map('trim') | select | list
+
+  # Custom fields as a dict: d42_cf['patch_group']
+  d42_cf: d42_custom_fields | default([]) | items2dict(key_name='key', value_name='value')
+
+  # SSH address: first IP in the preferred subnet if one is set, else the
+  # plugin's default (first IP returned)
+  ansible_host: >-
+    (d42_ip_addresses | default([])
+     | selectattr('subnet', 'equalto', d42_ssh_subnet | default('__none__'))
+     | map(attribute='ip') | first)
+    | default(ansible_host | default(inventory_hostname), true)
+
+  # OLVM VM name = Device42 device name (d42_virtual_host_name is the
+  # hypervisor host, not the VM)
+  olvm_vm_name: d42_name
+
+keyed_groups:
+  # Custom field "patch_group" → group patch_group_<value>
+  - key: d42_cf['patch_group'] | default('unassigned')
+    prefix: patch_group
+    separator: "_"
+  # Every tag → group tag_<tag>, e.g. tag_patch_exclude
+  - key: d42_tag_list
+    prefix: tag
+    separator: "_"

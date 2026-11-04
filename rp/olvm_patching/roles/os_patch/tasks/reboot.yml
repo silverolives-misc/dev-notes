@@ -1,0 +1,44 @@
+---
+# ------------------------------------------------------------------------------
+# os_patch : reboot                                                 steps 10, 11
+# ------------------------------------------------------------------------------
+
+- name: "Patch | Mark stage"
+  ansible.builtin.set_fact:
+    _op_stage: "reboot"
+
+# rc 1 = reboot required, rc 0 = not required
+- name: "Patch | Ask needs-restarting whether a reboot is required"
+  ansible.builtin.command:
+    argv: [needs-restarting, -r]
+  register: _op_nr
+  changed_when: false
+  failed_when: false
+  when: patch_reboot == 'if_required'
+
+- name: "Patch | Decide on reboot"
+  ansible.builtin.set_fact:
+    _op_reboot_needed: >-
+      {{
+        patch_reboot == 'always'
+        or (patch_reboot == 'if_required' and _op_nr.rc | default(1) != 0)
+      }}
+
+- name: "Patch | Warn that updates may not be live"
+  ansible.builtin.set_fact:
+    _op_warnings: "{{ _op_warnings + ['not rebooted (patch_reboot=' ~ patch_reboot ~ ')'] }}"
+  when: not _op_reboot_needed | bool
+
+# The reboot module waits for the host to come back and for test_command to
+# succeed over a fresh SSH connection (step 11).
+- name: "Patch | Reboot and wait for host to return"
+  ansible.builtin.reboot:
+    msg:               "Reboot for OS patching — {{ hostvars['localhost'].patch_change.ticket | default('change') }}"
+    reboot_timeout:    "{{ patch_reboot_timeout }}"
+    post_reboot_delay: "{{ patch_post_reboot_delay }}"
+    test_command:      "uptime"
+  when: _op_reboot_needed | bool
+
+- name: "Patch | Record reboot"
+  ansible.builtin.set_fact:
+    _op_rebooted: "{{ _op_reboot_needed | bool }}"

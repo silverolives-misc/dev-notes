@@ -1,0 +1,39 @@
+---
+# ------------------------------------------------------------------------------
+# os_patch : apply                                                       step 9
+# Package set matches patch_precheck's dnf check-update exactly (same
+# patch_mode / exclude / repo settings from group_vars).
+# ------------------------------------------------------------------------------
+
+- name: "Patch | Mark stage"
+  ansible.builtin.set_fact:
+    _op_stage: "apply"
+
+- name: "Patch | Record installed packages before"
+  ansible.builtin.package_facts:
+    manager: rpm
+
+- name: "Patch | Snapshot package list before"
+  ansible.builtin.set_fact:
+    _op_pkgs_before: "{{ lookup('ansible.builtin.template', 'nevra_list.j2') | from_yaml }}"
+
+- name: "Patch | Apply updates (mode: {{ patch_mode }})"
+  ansible.builtin.dnf:
+    name:         "{{ patch_packages if patch_mode == 'list' else '*' }}"
+    state:        latest
+    security:     "{{ patch_mode == 'security' }}"
+    exclude:      "{{ patch_exclude }}"
+    enablerepo:   "{{ patch_enablerepo if patch_enablerepo | length > 0 else omit }}"
+    disablerepo:  "{{ patch_disablerepo if patch_disablerepo | length > 0 else omit }}"
+    update_cache: true
+  register: _op_dnf
+
+- name: "Patch | Record installed packages after"
+  ansible.builtin.package_facts:
+    manager: rpm
+
+- name: "Patch | Work out what changed"
+  ansible.builtin.set_fact:
+    _op_updated: >-
+      {{ (lookup('ansible.builtin.template', 'nevra_list.j2') | from_yaml)
+         | difference(_op_pkgs_before) | sort }}

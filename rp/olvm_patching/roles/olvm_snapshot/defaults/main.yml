@@ -1,0 +1,36 @@
+---
+# ------------------------------------------------------------------------------
+# olvm_snapshot defaults
+# Connection settings and snapshot_description_prefix are in
+# group_vars/all/main.yml.
+# ------------------------------------------------------------------------------
+
+# OLVM VM name for a host. Device42 inventory composes this; fall back to the
+# short hostname.
+olvm_vm_name: "{{ inventory_hostname.split('.')[0] }}"
+
+# Max snapshot requests in flight against the engine at once
+olvm_snapshot_concurrency: 5
+
+# Seconds to wait for a snapshot create / delete to finish
+olvm_snapshot_timeout: 900
+
+# ------------------------------------------------------------------------------
+# Preflight tolerances (preflight.yml, create.yml)
+# ------------------------------------------------------------------------------
+
+# Expected growth of a snapshot during its retention, as % of each disk's
+# current actual size. Writes after the snapshot land in the new layer.
+olvm_snapshot_growth_pct: 25
+
+# Each storage domain must keep BOTH of these free after the expected growth
+olvm_storage_min_free_pct: 15
+olvm_storage_min_free_gb:  100
+
+# Snapshots already on a VM (excluding the live "Active VM"). A rerun of the
+# same change finds its own earlier snapshot, so allow at least 1.
+olvm_max_existing_snapshots: 1
+
+# Direct LUN and shareable disks are not included in OLVM snapshots, so the
+# snapshot would not be a full rollback point
+olvm_block_on_unsnapshottable_disks: true

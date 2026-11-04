@@ -1,0 +1,12 @@
+---
+# ------------------------------------------------------------------------------
+# olvm_snapshot : logout
+# Revokes the API token obtained by auth.yml.
+# ------------------------------------------------------------------------------
+
+- name: "OLVM | Revoke API token"
+  ovirt.ovirt.ovirt_auth:
+    ovirt_auth: "{{ ovirt_auth }}"
+    state:      absent
+  when: ovirt_auth is defined
+  no_log: true

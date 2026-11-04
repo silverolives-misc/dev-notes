@@ -1,0 +1,21 @@
+---
+# ------------------------------------------------------------------------------
+# jira_api : comment
+# Adds a comment. REST v2 accepts Jira wiki markup on both Cloud and DC.
+#
+# Inputs: jira_issue_key, jira_comment_body
+# ------------------------------------------------------------------------------
+
+- name: "Jira | Add comment to {{ jira_issue_key }}"
+  ansible.builtin.uri:
+    url:            "{{ jira_url }}/rest/api/2/issue/{{ jira_issue_key | urlencode }}/comment"
+    method:         POST
+    headers:        "{{ _jira_headers }}"
+    url_username:   "{{ jira_user if jira_auth_type == 'basic' else omit }}"
+    url_password:   "{{ jira_token if jira_auth_type == 'basic' else omit }}"
+    force_basic_auth: "{{ jira_auth_type == 'basic' }}"
+    body_format:    json
+    body:
+      body: "{{ jira_comment_body }}"
+    status_code:    201
+  no_log: "{{ jira_no_log }}"

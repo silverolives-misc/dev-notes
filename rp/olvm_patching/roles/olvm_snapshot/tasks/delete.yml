@@ -1,0 +1,14 @@
+---
+# ------------------------------------------------------------------------------
+# olvm_snapshot : delete                                                step 19
+# Inputs: _del (one record from 06_snapshot_cleanup.yml: vm, snapshot_id, ...)
+# ------------------------------------------------------------------------------
+
+- name: "Snapshot | Delete {{ _del.vm }} / {{ _del.description }}"
+  ovirt.ovirt.ovirt_snapshot:
+    auth:        "{{ hostvars['localhost'].ovirt_auth }}"
+    vm_name:     "{{ _del.vm }}"
+    snapshot_id: "{{ _del.snapshot_id }}"
+    state:       absent
+    wait:        true
+    timeout:     "{{ olvm_snapshot_timeout }}"

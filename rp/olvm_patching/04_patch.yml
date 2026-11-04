@@ -1,0 +1,109 @@
+---
+# ------------------------------------------------------------------------------
+# 04_patch.yml                                     Workflow node 5 — steps 9 – 14
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ PLAY 1 — localhost                                                      │
+# │   patch_targets (hosts with a confirmed snapshot) → run group           │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ PLAY 2 — run group, in batches of patch_serial                          │
+# │   dnf update → reboot → wait → SSH / kernel / services → record         │
+# │   max_fail_percentage stops later batches after failures                │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ PLAY 3 — localhost                                                      │
+# │   Summary; fail the job if any host failed (report node still runs)     │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Inputs:  patch_change, patch_targets                  (workflow artifacts)
+# Extra-vars:
+#   patch_serial         5     hosts per batch (int or "20%")
+#   patch_max_fail_pct   0     % of a batch allowed to fail before stopping
+#
+# Publishes (from inside the role, so it survives an aborted run):
+#   patch_results: { host: {status, stage, error, kernel_before, kernel_after,
+#                           rebooted, packages_updated, packages, warnings,
+#                           started, finished} }
+#
+# HA pairs: put each node of a pair in a different Device42 patch group (or a
+# different run) so both are never in the same batch.
+# ------------------------------------------------------------------------------
+
+# ==============================================================================
+# Play 1 | Prepare
+# ==============================================================================
+
+- name: "Patch | Prepare"
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: "Patch | Assert workflow inputs are present"
+      ansible.builtin.assert:
+        that:
+          - patch_change is defined
+          - patch_targets is defined
+        fail_msg: "patch_change / patch_targets missing — run after 03_snapshot.yml."
+        quiet: true
+
+    - name: "Patch | Nothing to patch"
+      ansible.builtin.debug:
+        msg: "No hosts with a confirmed snapshot — nothing to patch."
+      when: patch_targets | length == 0
+
+    - name: "Patch | Add targets to run group"
+      ansible.builtin.add_host:
+        name:   "{{ item }}"
+        groups: patch_run
+      loop: "{{ patch_targets }}"
+      changed_when: false
+
+# ==============================================================================
+# Play 2 | Patch
+# ==============================================================================
+
+- name: "Patch | Apply updates, reboot, validate"
+  hosts: patch_run
+  become: true
+  gather_facts: true
+  gather_subset: ["!all", "min"]
+  serial: "{{ patch_serial | default(5) }}"
+  max_fail_percentage: "{{ patch_max_fail_pct | default(0) }}"
+
+  roles:
+    - os_patch
+
+# ==============================================================================
+# Play 3 | Summary
+# Not reached if max_fail_percentage aborts the run — that is fine, the job is
+# already failed and patch_results was published per host by the role.
+# ==============================================================================
+
+- name: "Patch | Summary"
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    _hosts: "{{ groups['patch_run'] | default([]) }}"
+    _results: >-
+      {{
+        dict(_hosts | zip(_hosts | map('extract', hostvars)
+                                | map(attribute='os_patch_result',
+                                      default={'status': 'not_attempted'})))
+      }}
+    _failed: "{{ _results | dict2items | rejectattr('value.status', 'equalto', 'success') | map(attribute='key') | list }}"
+
+  tasks:
+
+    - name: "Patch | Store results for later plays in this run"
+      ansible.builtin.set_fact:
+        patch_results: "{{ _results }}"
+
+    - name: "Patch | Summary"
+      ansible.builtin.debug:
+        msg: "{{ _results | dict2items | map(attribute='key') | zip(_results | dict2items | map(attribute='value.status')) | map('join', ' — ') | list }}"
+
+    - name: "Patch | Fail job when any host did not patch cleanly"
+      ansible.builtin.fail:
+        msg: "Patching did not complete on: {{ _failed | join(', ') }}"
+      when: _failed | length > 0

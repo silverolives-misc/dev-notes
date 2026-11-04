@@ -1,0 +1,28 @@
+---
+# ------------------------------------------------------------------------------
+# site.yml — single-run chain of the patching workflow, for lab testing only.
+#
+#   ansible-playbook -i inventory/device42.d42.yml site.yml -e change_ticket=CHG-1234
+#
+# In production run the AAP workflow (aap/configure_controller.yml), which:
+#   - syncs Device42 inventory between the gate and pre-check
+#   - routes every failure to 05_report.yml so Jira is always updated
+#
+# Here, a hard failure (gate, or a patch batch exceeding max_fail_percentage)
+# stops the run and 05_report.yml does not run.
+# ------------------------------------------------------------------------------
+
+- name: "Step 1 | Change gate"
+  ansible.builtin.import_playbook: 01_change_gate.yml
+
+- name: "Steps 3 – 5, 8 | Scope and pre-checks"
+  ansible.builtin.import_playbook: 02_precheck.yml
+
+- name: "Steps 6, 7 | Snapshots"
+  ansible.builtin.import_playbook: 03_snapshot.yml
+
+- name: "Steps 9 – 14 | Patch"
+  ansible.builtin.import_playbook: 04_patch.yml
+
+- name: "Steps 14 – 16 | Report and Jira"
+  ansible.builtin.import_playbook: 05_report.yml

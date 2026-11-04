@@ -1,0 +1,71 @@
+---
+# ------------------------------------------------------------------------------
+# os_patch : main                                          steps 9 – 14 per host
+#
+# block/rescue records the outcome either way. On failure the rescue re-raises
+# so the host counts toward max_fail_percentage and stops later batches.
+# patch_results.<host> is published with set_stats in both paths, before any
+# re-raise, so the report node always has it.
+# ------------------------------------------------------------------------------
+
+- name: "Patch | Initialise"
+  ansible.builtin.set_fact:
+    _op_started:       "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+    _op_kernel_before: "{{ ansible_kernel }}"
+    _op_stage:         "init"
+    _op_warnings:      []
+    _op_rebooted:      false
+    _op_updated:       []
+
+- name: "Patch | Apply, reboot and validate"
+  block:
+
+    - name: "Patch | Step 9 — apply approved updates"
+      ansible.builtin.include_tasks: apply.yml
+
+    - name: "Patch | Steps 10, 11 — reboot and wait"
+      ansible.builtin.include_tasks: reboot.yml
+
+    - name: "Patch | Steps 12, 13 — validate"
+      ansible.builtin.include_tasks: validate.yml
+
+    - name: "Patch | Record success"
+      ansible.builtin.set_fact:
+        os_patch_result: "{{ _op_record | combine({'status': 'success', 'error': ''}) }}"
+
+  rescue:
+
+    - name: "Patch | Record failure"
+      ansible.builtin.set_fact:
+        os_patch_result: >-
+          {{ _op_record | combine({
+               'status': 'failed',
+               'error':  ansible_failed_task.name ~ ': '
+                         ~ (ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')))
+             }) }}
+
+    - name: "Patch | Publish failure"
+      ansible.builtin.set_stats:
+        data:
+          patch_results: "{{ {inventory_hostname: os_patch_result} }}"
+        per_host: false
+        aggregate: true
+
+    - name: "Patch | Fail host"
+      ansible.builtin.fail:
+        msg: "{{ os_patch_result.error }}"
+
+# Step 14 — success path
+- name: "Patch | Publish success"
+  ansible.builtin.set_stats:
+    data:
+      patch_results: "{{ {inventory_hostname: os_patch_result} }}"
+    per_host: false
+    aggregate: true
+
+- name: "Patch | Result"
+  ansible.builtin.debug:
+    msg: >-
+      SUCCESS — {{ os_patch_result.packages_updated }} package(s),
+      kernel {{ os_patch_result.kernel_before }} → {{ os_patch_result.kernel_after }},
+      rebooted={{ os_patch_result.rebooted }}

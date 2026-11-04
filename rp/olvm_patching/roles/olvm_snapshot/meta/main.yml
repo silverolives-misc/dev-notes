@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: olvm_snapshot
+  author: your_team
+  description: >
+    Oracle Linux Virtualization Manager (oVirt) snapshot operations for the
+    patching workflow: auth, create + verify, delete, logout. Call with
+    tasks_from. Requires ovirt-engine-sdk-python in the execution environment.
+  license: MIT
+  min_ansible_version: "2.16"
+
+dependencies: []

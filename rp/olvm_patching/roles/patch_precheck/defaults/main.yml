@@ -1,0 +1,64 @@
+---
+# ------------------------------------------------------------------------------
+# patch_precheck defaults
+# patch_mode / patch_packages / patch_exclude / patch_*repo are shared with
+# os_patch and live in group_vars/all/main.yml.
+# ------------------------------------------------------------------------------
+
+# Step 4 — how long to wait for SSH before marking a host unreachable
+precheck_connect_timeout: 60
+
+# Supported platforms
+precheck_supported_distributions:
+  - "OracleLinux"
+precheck_supported_major_versions:
+  - "8"
+  - "9"
+
+# ------------------------------------------------------------------------------
+# Filesystem tolerances. A host fails pre-check if ANY limit is breached.
+#   min_free_mb    absolute floor (protects small filesystems)
+#   max_used_pct   relative ceiling (protects large filesystems, where a fixed
+#                  MB floor is meaningless)
+#   max_inode_pct  inode exhaustion fails installs even with free space
+# Paths that are not separate mounts are checked as part of their parent.
+# Override per Device42 group for hosts with unusual layouts.
+# ------------------------------------------------------------------------------
+precheck_filesystems:
+  - { path: "/",     min_free_mb: 2048, max_used_pct: 90, max_inode_pct: 90 }
+  - { path: "/boot", min_free_mb: 300,  max_used_pct: 85, max_inode_pct: 90 }
+  - { path: "/var",  min_free_mb: 2048, max_used_pct: 90, max_inode_pct: 90 }
+  - { path: "/tmp",  min_free_mb: 512,  max_used_pct: 95, max_inode_pct: 95 }
+
+# Space that must remain on each filesystem AFTER the dry-run transaction's
+# download + installed size (and a new kernel on /boot) is accounted for
+precheck_tx_headroom_mb:   1024
+precheck_boot_headroom_mb: 50
+precheck_boot_kernel_mb:   150     # one UEK kernel + initramfs + rescue headroom
+
+# Fail when any pending update belongs to a different major release
+# (el9 packages offered to an OL8 host = mis-configured repos)
+precheck_block_foreign_major: true
+
+# dnf-automatic timer enabled: false = warn, true = fail the host
+precheck_fail_on_dnf_automatic: false
+
+# qemu-guest-agent lets OLVM freeze filesystems for a consistent snapshot.
+# true = fail the host when it is not running; false = warn only.
+precheck_require_guest_agent: false
+
+# Max package names kept per host for the report
+precheck_updates_list_max: 200
+
+# ------------------------------------------------------------------------------
+# Internal — dnf CLI arguments matching the os_patch dnf module call, so the
+# "available" list here is exactly what step 9 will install.
+# ------------------------------------------------------------------------------
+_precheck_dnf_args: >-
+  {{
+    (['--security'] if patch_mode == 'security' else [])
+    + (patch_exclude | map('regex_replace', '^', '--exclude=') | list)
+    + (['--enablerepo=' ~ (patch_enablerepo | join(','))] if patch_enablerepo | length > 0 else [])
+    + (['--disablerepo=' ~ (patch_disablerepo | join(','))] if patch_disablerepo | length > 0 else [])
+    + (patch_packages if patch_mode == 'list' else [])
+  }}

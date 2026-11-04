@@ -1,0 +1,24 @@
+---
+# ------------------------------------------------------------------------------
+# dev/vars.yml — overrides for running on the OCI dev box (pass with -e @).
+# ------------------------------------------------------------------------------
+
+# No OLVM on OCI: skip snapshots. Allowed only for patch groups matching
+# snapshot_test_mode_group_regex (dev / test / lab).
+snapshot_test_mode: true
+
+# Jira custom field IDs on your dev Jira (or the mock: dev/mock_jira.py)
+jira_field_patch_group:  "customfield_10001"
+jira_field_hosts:        "customfield_10002"
+jira_field_window_start: "customfield_10003"
+jira_field_window_end:   "customfield_10004"
+
+# OCI instances have no OLVM guest agent channel — expected, warn only
+precheck_require_guest_agent: false
+
+# Lab runs: patch one host at a time, stop on first failure
+patch_serial: 1
+patch_max_fail_pct: 0
+
+# Where the HTML report is written on the dev box
+report_dir: "/tmp"

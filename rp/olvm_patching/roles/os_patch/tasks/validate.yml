@@ -1,0 +1,103 @@
+---
+# ------------------------------------------------------------------------------
+# os_patch : validate                                               steps 12, 13
+# ------------------------------------------------------------------------------
+
+- name: "Patch | Mark stage"
+  ansible.builtin.set_fact:
+    _op_stage: "validate"
+
+# ------------------------------------------------------------------------------
+# Step 12 — SSH access, checked independently of the reboot module
+# ------------------------------------------------------------------------------
+
+- name: "Patch | Check SSH port answers from the execution node"
+  ansible.builtin.wait_for:
+    host:         "{{ ansible_host | default(inventory_hostname) }}"
+    port:         "{{ ansible_port | default(22) }}"
+    search_regex: "SSH"
+    timeout:      120
+  delegate_to: localhost
+  become: false
+
+- name: "Patch | Drop the cached SSH connection"
+  ansible.builtin.meta: reset_connection
+
+- name: "Patch | Log in over a fresh SSH session"
+  ansible.builtin.ping:
+
+- name: "Patch | Refresh facts"
+  ansible.builtin.setup:
+    gather_subset: ["!all", "min"]
+
+- name: "Patch | Read default boot kernel"
+  ansible.builtin.command:
+    argv: [grubby, --default-kernel]
+  register: _op_grubby
+  changed_when: false
+  failed_when: false
+
+- name: "Patch | Check running kernel is the default kernel"
+  vars:
+    _default: "{{ _op_grubby.stdout | regex_replace('^.*/vmlinuz-', '') }}"
+    _match:   "{{ _default == ansible_kernel }}"
+  when:
+    - _op_rebooted | bool
+    - _op_grubby.rc == 0
+    - not _match | bool
+  block:
+
+    - name: "Patch | Fail on kernel mismatch"
+      ansible.builtin.fail:
+        msg: "Running kernel {{ ansible_kernel }} is not the default {{ _default }} after reboot."
+      when: patch_fail_on_kernel_mismatch | bool
+
+    - name: "Patch | Warn on kernel mismatch"
+      ansible.builtin.set_fact:
+        _op_warnings: "{{ _op_warnings + ['running kernel ' ~ ansible_kernel ~ ' is not default ' ~ _default] }}"
+
+- name: "Patch | List failed systemd units"
+  ansible.builtin.command:
+    argv: [systemctl, --failed, --no-legend, --plain]
+  register: _op_failed_units
+  changed_when: false
+  failed_when: false
+
+- name: "Patch | Warn on failed systemd units"
+  ansible.builtin.set_fact:
+    _op_warnings: "{{ _op_warnings + ['failed units: ' ~ (_op_failed_units.stdout_lines | map('split') | map('first') | join(', '))] }}"
+  when: _op_failed_units.stdout_lines | length > 0
+
+# ------------------------------------------------------------------------------
+# Step 13 — optional service / process / command checks
+# ------------------------------------------------------------------------------
+
+- name: "Patch | Check required services are running"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+  register: _op_svc
+  until: _op_svc.status.ActiveState | default('') == 'active'
+  retries: "{{ patch_service_retries }}"
+  delay:   "{{ patch_service_delay }}"
+  loop: "{{ patch_required_services }}"
+
+- name: "Patch | Check required processes are running"
+  ansible.builtin.command:
+    argv: [pgrep, -f, "{{ item }}"]
+  register: _op_proc
+  until: _op_proc.rc == 0
+  retries: "{{ patch_service_retries }}"
+  delay:   "{{ patch_service_delay }}"
+  changed_when: false
+  loop: "{{ patch_required_processes }}"
+
+- name: "Patch | Run validation commands"
+  ansible.builtin.shell: "{{ item.cmd }}"   # noqa: command-instead-of-shell
+  register: _op_cmd
+  until: _op_cmd.rc == 0
+  retries: "{{ patch_service_retries }}"
+  delay:   "{{ patch_service_delay }}"
+  changed_when: false
+  loop: "{{ patch_validation_commands }}"
+  loop_control:
+    label: "{{ item.name }}"

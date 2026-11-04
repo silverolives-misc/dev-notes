@@ -1,0 +1,182 @@
+---
+# ------------------------------------------------------------------------------
+# 02_precheck.yml                               Workflow node 3 — steps 5, 4, 3, 8
+#
+# Runs after the Device42 inventory sync (workflow node 2, step 2).
+# Order is deliberate: scope is decided before anything touches a host,
+# connectivity is proven before facts are gathered, and available updates are
+# checked before any snapshot is taken — hosts with nothing to install are
+# never snapshotted.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ PLAY 1 — localhost                                          (step 5)    │
+# │   Device42 patch group ∩ ticket host list − patch_exclude tag →         │
+# │   in-scope group                                                        │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ PLAY 2 — in-scope hosts                              (steps 4, 3, 8)    │
+# │   connectivity → facts → OS / disk / sudo / guest agent → updates       │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ PLAY 3 — localhost                                                      │
+# │   Publish patch_scope, patch_precheck, patch_targets                    │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Inputs:
+#   patch_change        from 01_change_gate.yml (workflow artifact)
+#   patch_limit         optional survey field: further narrow to these hosts
+#
+# Publishes:
+#   patch_scope:     [ {host, in_scope, reason} ]
+#   patch_precheck:  { host: {status, reasons, warnings, os, kernel, updates_count, updates} }
+#   patch_targets:   [ hosts with status == ready ]
+# ------------------------------------------------------------------------------
+
+# ==============================================================================
+# Play 1 | Scope (step 5)
+# ==============================================================================
+
+- name: "Scope | Resolve in-scope hosts"
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    _group_name: "{{ (patch_group_prefix ~ patch_change.patch_group) | regex_replace('[^A-Za-z0-9_]', '_') }}"
+    _members:    "{{ groups[_group_name] | default([]) }}"
+    _excluded:   "{{ groups[patch_exclude_group] | default([]) }}"
+    _ticket:     "{{ patch_change.ticket_hosts | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
+    _limit_raw:  "{{ patch_limit | default('', true) }}"
+    _limit:      >-
+      {{
+        (_limit_raw if (_limit_raw is sequence and _limit_raw is not string)
+         else (_limit_raw | string | regex_replace('[\s,;]+', ' ')).split())
+        | map('regex_replace', '\\..*$', '') | map('lower') | list
+      }}
+
+  tasks:
+
+    - name: "Scope | Assert patch_change is present"
+      ansible.builtin.assert:
+        that:
+          - patch_change is defined
+          - patch_change.patch_group | default('') | length > 0
+        fail_msg: "patch_change missing — this job must run after 01_change_gate.yml in the workflow."
+        quiet: true
+
+    - name: "Scope | Assert Device42 patch group '{{ _group_name }}' has members"
+      ansible.builtin.assert:
+        that:
+          - _members | length > 0
+        fail_msg: >
+          Inventory group '{{ _group_name }}' is empty or missing. Check the
+          Device42 patch_group custom field and that the inventory sync ran.
+
+    - name: "Scope | Evaluate each group member"
+      vars:
+        _short: "{{ item.split('.')[0] | lower }}"
+        _reason: >-
+          {{
+            'Device42 ' ~ patch_exclude_group ~ ' tag' if item in _excluded
+            else 'not listed on change ticket' if (_ticket | length > 0 and _short not in _ticket)
+            else 'outside patch_limit' if (_limit | length > 0 and _short not in _limit)
+            else ''
+          }}
+      ansible.builtin.set_fact:
+        _scope: "{{ _scope | default([]) + [{'host': item, 'in_scope': _reason | length == 0, 'reason': _reason or 'in scope'}] }}"
+      loop: "{{ _members }}"
+
+    - name: "Scope | Record ticket hosts that are not in the patch group"
+      vars:
+        _member_short: "{{ _members | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
+      ansible.builtin.set_fact:
+        _scope: "{{ _scope + [{'host': item, 'in_scope': false, 'reason': 'on ticket but not in Device42 group ' ~ _group_name}] }}"
+      loop: "{{ _ticket | difference(_member_short) }}"
+
+    - name: "Scope | Add in-scope hosts to run group"
+      ansible.builtin.add_host:
+        name:   "{{ item.host }}"
+        groups: patch_in_scope
+      loop: "{{ _scope | selectattr('in_scope') | list }}"
+      loop_control:
+        label: "{{ item.host }}"
+      changed_when: false
+
+    - name: "Scope | Assert at least one host is in scope"
+      ansible.builtin.assert:
+        that:
+          - _scope | selectattr('in_scope') | list | length > 0
+        fail_msg: "No hosts in scope. Exclusions: {{ _scope | rejectattr('in_scope') | items2dict(key_name='host', value_name='reason') }}"
+
+    - name: "Scope | Store patch_scope"
+      ansible.builtin.set_fact:
+        patch_scope: "{{ _scope }}"
+
+    - name: "Scope | Summary"
+      ansible.builtin.debug:
+        msg: "{{ _scope | map(attribute='host') | zip(_scope | map(attribute='reason')) | map('join', ' — ') | list }}"
+
+# ==============================================================================
+# Play 2 | Connectivity, facts, readiness, available updates (steps 4, 3, 8)
+# ==============================================================================
+
+- name: "Pre-check | Host readiness"
+  hosts: patch_in_scope
+  gather_facts: false
+  become: true
+
+  roles:
+    - patch_precheck
+
+# ==============================================================================
+# Play 3 | Publish results
+# ==============================================================================
+
+- name: "Pre-check | Publish results"
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    _results: >-
+      {{
+        dict(groups['patch_in_scope'] | default([])
+             | zip(groups['patch_in_scope'] | default([])
+                   | map('extract', hostvars)
+                   | map(attribute='patch_precheck_result',
+                         default={'status': 'failed', 'reasons': ['pre-check did not complete'], 'warnings': [], 'updates_count': 0})))
+      }}
+
+  tasks:
+
+    # Publish from local values: workflow artifacts arrive as extra-vars,
+    # which set_fact cannot override.
+    - name: "Pre-check | Build target list"
+      ansible.builtin.set_fact:
+        _ready: "{{ _results | dict2items | selectattr('value.status', 'equalto', 'ready') | map(attribute='key') | list }}"
+
+    - name: "Pre-check | Store results for later plays in this run"
+      ansible.builtin.set_fact:
+        patch_precheck: "{{ _results }}"
+        patch_targets:  "{{ _ready }}"
+
+    - name: "Pre-check | Publish to workflow"
+      ansible.builtin.set_stats:
+        data:
+          patch_scope:    "{{ patch_scope }}"
+          patch_precheck: "{{ _results }}"
+          patch_targets:  "{{ _ready }}"
+        per_host: false
+        aggregate: false
+
+    - name: "Pre-check | Summary"
+      ansible.builtin.debug:
+        msg:
+          - "Ready to patch: {{ _ready | length }} — {{ _ready | join(', ') }}"
+          - "No updates:     {{ _results | dict2items | selectattr('value.status', 'equalto', 'no_updates') | map(attribute='key') | join(', ') }}"
+          - "Failed:         {{ _results | dict2items | selectattr('value.status', 'equalto', 'failed') | map(attribute='key') | join(', ') }}"
+
+    - name: "Pre-check | Fail when strict mode and any host failed"
+      ansible.builtin.fail:
+        msg: "precheck_fail_on_any_error is set and {{ _failed | length }} host(s) failed pre-checks: {{ _failed | join(', ') }}"
+      vars:
+        _failed: "{{ _results | dict2items | selectattr('value.status', 'equalto', 'failed') | map(attribute='key') | list }}"
+      when:
+        - precheck_fail_on_any_error | default(false) | bool
+        - _failed | length > 0

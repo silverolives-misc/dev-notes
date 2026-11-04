@@ -1,0 +1,40 @@
+---
+# ------------------------------------------------------------------------------
+# ansible-builder v3 definition for the patching execution environment.
+#
+#   ansible-builder build -t <hub>/ee-olvm-patching:1.0.0
+#   podman push <hub>/ee-olvm-patching:1.0.0
+#
+# Push to the private automation hub that ships with the Azure managed AAP
+# (or an Azure Container Registry the controller can pull from).
+#
+# ovirt-engine-sdk-python builds against libxml2 and pycurl (libcurl), so the
+# compiler and -devel packages below are needed at build time.
+# ------------------------------------------------------------------------------
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform-25/ee-minimal-rhel9:latest
+
+dependencies:
+  # Pinned to 2.16: 2.17+ drops target-side Python 3.6, and OL8's dnf bindings
+  # exist only for platform-python 3.6 — so 2.17 cannot patch OL8 hosts.
+  # 2.16 is also the last release that manages OL7 (Python 2.7 / 3.6) targets.
+  ansible_core:
+    package_pip: ansible-core>=2.16,<2.17
+  ansible_runner:
+    package_pip: ansible-runner
+  galaxy: collections/requirements.yml
+  python:
+    - ovirt-engine-sdk-python>=4.6.0
+    - requests
+  system:
+    - gcc [platform:rpm]
+    - libcurl-devel [platform:rpm]
+    - libxml2-devel [platform:rpm]
+    - openssl-devel [platform:rpm]
+    - python3-devel [platform:rpm]
+
+options:
+  package_manager_path: /usr/bin/microdnf

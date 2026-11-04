@@ -1,0 +1,195 @@
+---
+# ------------------------------------------------------------------------------
+# 03_snapshot.yml                                      Workflow node 4 — steps 6, 7
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ PLAY 1 — localhost                                                      │
+# │   OLVM auth → storage domain + disk preflight (all targets together)    │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ PLAY 2 — patch_targets (delegated to localhost, parallel)               │
+# │   preflight block? → find VM → existing snapshots ok? → snapshot →      │
+# │   confirm status ok                                                     │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ PLAY 3 — localhost                                                      │
+# │   Publish patch_snapshots; narrow patch_targets to confirmed snapshots  │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Inputs:   patch_change, patch_targets         (workflow artifacts)
+# Publishes:
+#   patch_snapshots: { host: {status, vm, vm_id, snapshot_id, description, error} }
+#   patch_targets:   [ hosts with a confirmed snapshot ]   (replaces input)
+#
+# Hosts without a confirmed snapshot are dropped from patch_targets and will
+# not be patched. Set snapshot_fail_on_any_error=true to fail the job instead.
+#
+# TEST MODE (development only — e.g. OCI instances with no OLVM):
+#   snapshot_test_mode=true skips OLVM entirely and passes every target through
+#   with status skipped_test_mode. Refused unless the Device42 patch group
+#   matches snapshot_test_mode_group_regex. The report and Jira comment flag
+#   every such host "NO SNAPSHOT — test mode".
+# ------------------------------------------------------------------------------
+
+# ==============================================================================
+# Play 1 | Prepare
+# ==============================================================================
+
+- name: "Snapshot | Prepare"
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: "Snapshot | Assert workflow inputs are present"
+      ansible.builtin.assert:
+        that:
+          - patch_change is defined
+          - patch_targets is defined
+        fail_msg: "patch_change / patch_targets missing — run after 02_precheck.yml."
+        quiet: true
+
+    - name: "Snapshot | Nothing to snapshot"
+      ansible.builtin.debug:
+        msg: "No hosts need patching — no snapshots taken."
+      when: patch_targets | length == 0
+
+    # --------------------------------------------------------------------------
+    # Test mode — no OLVM. Guarded so it cannot run against a real patch group.
+    # --------------------------------------------------------------------------
+    - name: "Snapshot | TEST MODE — skip snapshots"
+      when:
+        - snapshot_test_mode | default(false) | bool
+        - patch_targets | length > 0
+      block:
+
+        - name: "Snapshot | TEST MODE — refuse unless the patch group is a test group"
+          ansible.builtin.assert:
+            that:
+              - patch_change.patch_group is match(snapshot_test_mode_group_regex)
+            fail_msg: >-
+              snapshot_test_mode is set but patch group '{{ patch_change.patch_group }}'
+              does not match '{{ snapshot_test_mode_group_regex }}'. Refusing to patch
+              without snapshots.
+
+        - name: "Snapshot | TEST MODE — pass targets through without snapshots"
+          ansible.builtin.set_fact:
+            _test_mode_results: >-
+              {%- set ns = namespace(d={}) -%}
+              {%- for h in patch_targets -%}
+                {%- set ns.d = ns.d | combine({h: {'status': 'skipped_test_mode', 'vm': '', 'snapshot_id': '',
+                                                   'description': '', 'error': ''}}) -%}
+              {%- endfor -%}
+              {{ ns.d }}
+
+        - name: "Snapshot | TEST MODE — warning"
+          ansible.builtin.debug:
+            msg: "TEST MODE: {{ patch_targets | length }} host(s) will be patched WITHOUT a snapshot."
+
+    - name: "Snapshot | Build description and target group"
+      when:
+        - patch_targets | length > 0
+        - not snapshot_test_mode | default(false) | bool
+      block:
+
+        - name: "Snapshot | Set snapshot description"
+          ansible.builtin.set_fact:
+            olvm_snapshot_description: >-
+              {{ snapshot_description_prefix }}|{{ patch_change.ticket }}|{{ now(utc=true).strftime('%Y%m%dT%H%M%SZ') }}
+
+        - name: "Snapshot | Add targets to snapshot group"
+          ansible.builtin.add_host:
+            name:   "{{ item }}"
+            groups: patch_snapshot_targets
+          loop: "{{ patch_targets }}"
+          changed_when: false
+
+        - name: "Snapshot | Authenticate to OLVM"
+          ansible.builtin.include_role:
+            name: olvm_snapshot
+            tasks_from: auth
+
+        # Storage capacity and snapshot-able disks, for all targets at once.
+        # Blocked hosts fail their snapshot task with the reason, so they
+        # appear as snapshot_failed in the report and are not patched.
+        - name: "Snapshot | Storage and disk preflight"
+          ansible.builtin.include_role:
+            name: olvm_snapshot
+            tasks_from: preflight
+          vars:
+            _preflight_targets: "{{ patch_targets }}"
+
+# ==============================================================================
+# Play 2 | Create and verify snapshots
+# ==============================================================================
+
+- name: "Snapshot | Create pre-patch snapshots"
+  hosts: patch_snapshot_targets
+  gather_facts: false
+
+  tasks:
+
+    - name: "Snapshot | Create and verify"
+      ansible.builtin.include_role:
+        name: olvm_snapshot
+        tasks_from: create
+      vars:
+        olvm_snapshot_description: "{{ hostvars['localhost'].olvm_snapshot_description }}"
+
+# ==============================================================================
+# Play 3 | Publish
+# ==============================================================================
+
+- name: "Snapshot | Publish results"
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    _hosts: "{{ groups['patch_snapshot_targets'] | default([]) }}"
+    _ok_status: ["created", "skipped_test_mode"]
+    _results: >-
+      {{
+        _test_mode_results if _test_mode_results is defined else
+        dict(_hosts | zip(_hosts | map('extract', hostvars)
+                                | map(attribute='olvm_snapshot_result',
+                                      default={'status': 'failed', 'error': 'snapshot task did not run'})))
+      }}
+
+  tasks:
+
+    # In a workflow, patch_targets arrives as an extra-var, which set_fact
+    # cannot override — so publish from the local _confirmed value. The
+    # set_fact only matters for single-run site.yml.
+    - name: "Snapshot | Narrow targets to confirmed snapshots"
+      ansible.builtin.set_fact:
+        _confirmed:      "{{ _results | dict2items | selectattr('value.status', 'in', _ok_status) | map(attribute='key') | list }}"
+        patch_snapshots: "{{ _results }}"
+
+    - name: "Snapshot | Update patch_targets for later plays in this run"
+      ansible.builtin.set_fact:
+        patch_targets: "{{ _confirmed }}"
+
+    - name: "Snapshot | Publish to workflow"
+      ansible.builtin.set_stats:
+        data:
+          patch_snapshots: "{{ _results }}"
+          patch_targets:   "{{ _confirmed }}"
+        per_host: false
+        aggregate: false
+
+    - name: "Snapshot | Summary"
+      ansible.builtin.debug:
+        msg: "{{ _results | dict2items | map(attribute='key') | zip(_results | dict2items | map(attribute='value.status')) | map('join', ' — ') | list }}"
+
+    - name: "Snapshot | Revoke OLVM token"
+      ansible.builtin.include_role:
+        name: olvm_snapshot
+        tasks_from: logout
+      when: ovirt_auth is defined     # never logged in under test mode
+
+    - name: "Snapshot | Fail when strict mode and any snapshot failed"
+      ansible.builtin.fail:
+        msg: "snapshot_fail_on_any_error is set and snapshots failed for: {{ _failed | join(', ') }}"
+      vars:
+        _failed: "{{ _results | dict2items | rejectattr('value.status', 'in', _ok_status) | map(attribute='key') | list }}"
+      when:
+        - snapshot_fail_on_any_error | default(false) | bool
+        - _failed | length > 0

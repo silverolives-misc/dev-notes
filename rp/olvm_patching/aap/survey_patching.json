@@ -1,0 +1,55 @@
+{
+  "name": "OS Patching",
+  "description": "Approved Jira change drives scope; patch group and limit are optional overrides.",
+  "spec": [
+    {
+      "question_name": "Jira change ticket",
+      "question_description": "Approved change record, e.g. CHG-1234",
+      "variable": "change_ticket",
+      "type": "text",
+      "required": true,
+      "min": 3,
+      "max": 32,
+      "default": ""
+    },
+    {
+      "question_name": "Patch group (override)",
+      "question_description": "Device42 patch group. Leave blank to use the value on the change ticket.",
+      "variable": "patch_group",
+      "type": "text",
+      "required": false,
+      "min": 0,
+      "max": 64,
+      "default": ""
+    },
+    {
+      "question_name": "Limit to hosts",
+      "question_description": "Optional: comma-separated short hostnames to narrow the run.",
+      "variable": "patch_limit",
+      "type": "textarea",
+      "required": false,
+      "min": 0,
+      "max": 4096,
+      "default": ""
+    },
+    {
+      "question_name": "Hosts per batch",
+      "question_description": "Number or percentage of hosts patched at once.",
+      "variable": "patch_serial",
+      "type": "text",
+      "required": true,
+      "min": 1,
+      "max": 4,
+      "default": "5"
+    },
+    {
+      "question_name": "Reboot",
+      "question_description": "always = reboot every patched host; if_required = only when needs-restarting says so.",
+      "variable": "patch_reboot",
+      "type": "multiplechoice",
+      "choices": ["always", "if_required"],
+      "required": true,
+      "default": "always"
+    }
+  ]
+}

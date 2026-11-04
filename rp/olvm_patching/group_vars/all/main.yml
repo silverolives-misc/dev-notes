@@ -1,0 +1,100 @@
+---
+# ------------------------------------------------------------------------------
+# group_vars/all/main.yml
+# Settings shared by every playbook in the patching workflow.
+# Anything here can be overridden per job template via extra-vars or survey.
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Jira — connection details come from the "Jira" custom credential type
+# (JIRA_URL / JIRA_USER / JIRA_TOKEN). See aap/credential_types.yml.
+# ------------------------------------------------------------------------------
+jira_url:       "{{ lookup('env', 'JIRA_URL') | regex_replace('/$', '') }}"
+jira_user:      "{{ lookup('env', 'JIRA_USER') }}"
+jira_token:     "{{ lookup('env', 'JIRA_TOKEN') }}"
+
+# basic  = Jira Cloud (email + API token)
+# bearer = Jira Data Center / Server (personal access token; jira_user unused)
+jira_auth_type: "basic"
+
+# Issue types that are accepted as a change record
+jira_change_issue_types:
+  - "Change"
+
+# Statuses in which patching is permitted to start (step 1)
+jira_approved_statuses:
+  - "Approved"
+  - "Scheduled"
+  - "Implementing"
+
+# Custom field IDs on the change issue. Find with:
+#   GET {{ jira_url }}/rest/api/2/field
+# Leave a field empty ("") to disable the related behaviour.
+jira_field_patch_group:   ""    # Device42 patch group name (text / select)
+jira_field_hosts:         ""    # Host list (text, comma / space / newline separated)
+jira_field_window_start:  ""    # Planned start (datetime)
+jira_field_window_end:    ""    # Planned end (datetime)
+
+# Enforce the planned change window from the ticket
+enforce_change_window:        true
+change_window_grace_minutes:  15
+
+# Attach the HTML report to the Jira issue (step 16)
+jira_attach_report: true
+
+# Optional transition ID to apply after a fully successful run ("" = none)
+jira_transition_on_success: ""
+
+# ------------------------------------------------------------------------------
+# Device42 inventory (step 2)
+# Groups are built by inventory/device42.d42.yml keyed_groups.
+# A patch group "wave1" becomes inventory group "patch_group_wave1".
+# ------------------------------------------------------------------------------
+patch_group_prefix:   "patch_group_"
+patch_exclude_group:  "tag_patch_exclude" # Device42 tag patch_exclude → hosts never patched
+
+# ------------------------------------------------------------------------------
+# What counts as an "approved" update (steps 8 and 9).
+# Shared by the pre-check (what is available) and the patch run (what is
+# applied) so both always see the same package set.
+#
+#   all       every available update from the enabled repos
+#   security  security errata only (dnf --security)
+#   list      only the packages named in patch_packages
+#
+# For identical package sets across environments, point the hosts at a frozen
+# repo snapshot (ULN channel clone / Pulp / mirror) and use mode "all".
+# ------------------------------------------------------------------------------
+patch_mode:          "all"
+patch_packages:      []        # used when patch_mode == list
+patch_exclude:       []        # e.g. ["kernel-uek*", "oracle-database-*"]
+patch_enablerepo:    []
+patch_disablerepo:   []
+
+# ------------------------------------------------------------------------------
+# OLVM — connection details come from the "OLVM" custom credential type
+# (OVIRT_URL / OVIRT_USERNAME / OVIRT_PASSWORD / OVIRT_CA_FILE).
+# OVIRT_URL format: https://olvm.example.com/ovirt-engine/api
+# ------------------------------------------------------------------------------
+olvm_url:       "{{ lookup('env', 'OVIRT_URL') }}"
+olvm_username:  "{{ lookup('env', 'OVIRT_USERNAME') }}"
+olvm_password:  "{{ lookup('env', 'OVIRT_PASSWORD') }}"
+olvm_ca_file:   "{{ lookup('env', 'OVIRT_CA_FILE') }}"
+olvm_insecure:  false
+
+# Snapshot description format. The cleanup job parses this — do not change
+# the field order once snapshots exist.
+#   ANSIBLE-PATCH|<ticket>|<UTC timestamp>
+snapshot_description_prefix: "ANSIBLE-PATCH"
+
+# Retention before a snapshot becomes eligible for deletion (step 18)
+snapshot_retention_days: 7
+
+# ------------------------------------------------------------------------------
+# Snapshot TEST MODE — development only (e.g. OCI instances, no OLVM).
+# Skips the snapshot step entirely. Refused unless the patch group matches the
+# regex below, and every affected host is flagged in the report and on Jira.
+# Never set this on a production job template.
+# ------------------------------------------------------------------------------
+snapshot_test_mode:             false
+snapshot_test_mode_group_regex: "^(dev|test|lab)([_-]|$)"

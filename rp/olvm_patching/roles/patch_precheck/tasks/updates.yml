@@ -1,0 +1,143 @@
+---
+# ------------------------------------------------------------------------------
+# patch_precheck : updates                                               step 8
+#   1. List approved updates (same dnf arguments as the patch run)
+#   2. Guard: no package from another major release (el9 on an OL8 host)
+#   3. Dry-run the transaction and check the space it needs:
+#        download size  → filesystem holding /var/cache/dnf
+#        installed size → filesystem holding /usr
+#        new kernel     → /boot
+#      Each must leave precheck_tx_headroom_mb free afterwards
+#      (precheck_boot_headroom_mb for a separate /boot). When two of these
+#      share a filesystem their needs are added together. Installed size is
+#      the full size of the new packages, not the net change — deliberately
+#      conservative.
+# ------------------------------------------------------------------------------
+
+# rc 100 = updates available, 0 = none, anything else = repo error
+- name: "Pre-check | List available approved updates (mode: {{ patch_mode }})"
+  ansible.builtin.command:
+    argv: "{{ ['dnf', '-q', '--refresh', 'check-update'] + _precheck_dnf_args }}"
+  register: _pc_check
+  changed_when: false
+  failed_when: _pc_check.rc not in [0, 100]
+
+# Entries are "name.arch version-release"
+- name: "Pre-check | Parse available updates"
+  ansible.builtin.set_fact:
+    _pc_updates: >-
+      {{
+        _pc_check.stdout_lines
+        | select('match', '^\S+\.(x86_64|noarch|aarch64|i686)\s+\S+\s+\S+')
+        | map('regex_replace', '^(\S+)\s+(\S+)\s+.*$', '\1 \2')
+        | list
+      }}
+
+# ------------------------------------------------------------------------------
+# Major release guard
+# Release tags look like 9-28.el9, 300.el9uek, 1.module+el8.9.0+...
+# ------------------------------------------------------------------------------
+
+- name: "Pre-check | Find updates from another major release"
+  vars:
+    _major: "{{ ansible_distribution_major_version }}"
+  ansible.builtin.set_fact:
+    _pc_foreign: >-
+      {{
+        _pc_updates
+        | select('search', '\s\S*[.+]el[0-9]+')
+        | reject('search', '\s\S*[.+]el' ~ _major ~ '(?![0-9])')
+        | list
+      }}
+
+- name: "Pre-check | Record updates from another major release"
+  ansible.builtin.set_fact:
+    _pc_reasons: >-
+      {{ _pc_reasons + [(_pc_foreign | length | string) ~ ' update(s) are not el'
+         ~ ansible_distribution_major_version ~ ' — check repo configuration: '
+         ~ (_pc_foreign[:5] | join(', '))] }}
+  when:
+    - precheck_block_foreign_major | bool
+    - _pc_foreign | length > 0
+
+# ------------------------------------------------------------------------------
+# Transaction size vs free space
+# ------------------------------------------------------------------------------
+
+- name: "Pre-check | Size the update and check space"
+  when:
+    - _pc_updates | length > 0
+    - _pc_reasons | length == 0
+  block:
+
+    # --assumeno resolves the full transaction then stops: rc 1 with
+    # "Operation aborted" is the expected result
+    - name: "Pre-check | Dry-run the update transaction"
+      ansible.builtin.command:
+        argv: "{{ ['dnf', 'update', '--assumeno'] + _precheck_dnf_args }}"
+      register: _pc_tx
+      changed_when: false
+      failed_when: >-
+        'Operation aborted' not in (_pc_tx.stdout ~ _pc_tx.stderr)
+        and 'Nothing to do' not in (_pc_tx.stdout ~ _pc_tx.stderr)
+
+    - name: "Pre-check | Read free space where the update lands"
+      ansible.builtin.command:
+        argv: [df, "--output=target,avail", -BM, /var/cache/dnf, /usr, /boot]
+      register: _pc_txdf
+      changed_when: false
+
+    - name: "Pre-check | Work out space needed per filesystem"
+      vars:
+        _out: "{{ _pc_tx.stdout ~ '\n' ~ _pc_tx.stderr }}"
+        # "Total download size: 412 M" / "Installed size: 1.3 G" / "... 980 k"
+        _dl:  "{{ _out | regex_search('Total download size: ([0-9.]+) ([kMG])', '\\1', '\\2') | default(['0', 'M'], true) }}"
+        _ins: "{{ _out | regex_search('Installed size: ([0-9.]+) ([kMG])', '\\1', '\\2') | default(['0', 'M'], true) }}"
+        _mult: { k: 0.001, M: 1, G: 1024 }
+        _rows: "{{ _pc_txdf.stdout_lines[1:] | map('split') | list }}"
+        _kernel: "{{ _pc_updates | select('match', '^kernel(-uek)?(-core)?\\.') | list | length > 0 }}"
+      ansible.builtin.set_fact:
+        _pc_need:
+          download_mb:  "{{ (_dl[0] | float * _mult[_dl[1]]) | round(0, 'ceil') | int }}"
+          installed_mb: "{{ (_ins[0] | float * _mult[_ins[1]]) | round(0, 'ceil') | int }}"
+          kernel:       "{{ _kernel }}"
+          # mount → free MB, and the mount each target path lives on
+          free: "{{ dict(_rows | map('first') | zip(_rows | map('last') | map('regex_replace', 'M$', '') | map('int'))) }}"
+          mounts:
+            cache: "{{ _rows[0][0] }}"
+            usr:   "{{ _rows[1][0] }}"
+            boot:  "{{ _rows[2][0] }}"
+
+    - name: "Pre-check | Sum space needed per filesystem"
+      vars:
+        _demand:
+          - { mount: "{{ _pc_need.mounts.cache }}", mb: "{{ _pc_need.download_mb }}" }
+          - { mount: "{{ _pc_need.mounts.usr }}",   mb: "{{ _pc_need.installed_mb }}" }
+          - { mount: "{{ _pc_need.mounts.boot }}",  mb: "{{ precheck_boot_kernel_mb if _pc_need.kernel | bool else 0 }}" }
+      ansible.builtin.set_fact:
+        _pc_demand: >-
+          {%- set ns = namespace(d={}) -%}
+          {%- for x in _demand -%}{%- set ns.d = ns.d | combine({x.mount: ns.d.get(x.mount, 0) + (x.mb | int)}) -%}{%- endfor -%}
+          {{ ns.d }}
+
+    - name: "Pre-check | Record transaction size"
+      ansible.builtin.set_fact:
+        _pc_tx_summary: "download {{ _pc_need.download_mb }} MB, installed {{ _pc_need.installed_mb }} MB{{ ', new kernel' if _pc_need.kernel | bool else '' }}"
+
+    - name: "Pre-check | Check each filesystem keeps its headroom after the update"
+      vars:
+        _free: "{{ _pc_need.free[item.key] | int }}"
+        _left: "{{ _free | int - item.value | int }}"
+        # a separate /boot is small, so it keeps a smaller headroom
+        _headroom: >-
+          {{ precheck_boot_headroom_mb
+             if (item.key == _pc_need.mounts.boot and item.key != _pc_need.mounts.usr)
+             else precheck_tx_headroom_mb }}
+      ansible.builtin.set_fact:
+        _pc_reasons: >-
+          {{ _pc_reasons + [item.key ~ ': update needs ' ~ item.value ~ ' MB, ' ~ _free
+             ~ ' MB free — would leave ' ~ _left ~ ' MB, need ' ~ _headroom] }}
+      loop: "{{ _pc_demand | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}: needs {{ item.value }} MB"
+      when: _left | int < _headroom | int

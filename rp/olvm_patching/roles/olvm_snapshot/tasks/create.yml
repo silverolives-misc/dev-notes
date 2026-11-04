@@ -1,0 +1,116 @@
+---
+# ------------------------------------------------------------------------------
+# olvm_snapshot : create                                         steps 6 and 7
+# Runs once per target host, delegated to localhost, so snapshots for
+# different VMs are requested in parallel (bounded by forks / throttle).
+#
+# Inputs:
+#   olvm_snapshot_description   ANSIBLE-PATCH|<ticket>|<stamp>
+#   hostvars['localhost'].ovirt_auth
+#
+# Sets olvm_snapshot_result: { status, vm, vm_id, snapshot_id, description, error }
+# A host whose snapshot is not confirmed must NOT be patched.
+# ------------------------------------------------------------------------------
+
+- name: "Snapshot | Create and verify"
+  delegate_to: localhost
+  throttle: "{{ olvm_snapshot_concurrency }}"
+  block:
+
+    - name: "Snapshot | Stop if storage / disk preflight blocked this VM"
+      ansible.builtin.fail:
+        msg: "Preflight: {{ hostvars['localhost'].olvm_preflight_block[inventory_hostname] }}"
+      when: inventory_hostname in hostvars['localhost'].olvm_preflight_block | default({})
+
+    - name: "Snapshot | Look up VM '{{ olvm_vm_name }}'"
+      ovirt.ovirt.ovirt_vm_info:
+        auth:    "{{ hostvars['localhost'].ovirt_auth }}"
+        pattern: "name={{ olvm_vm_name }}"
+      register: _vm_info
+
+    - name: "Snapshot | Assert exactly one VM matches"
+      ansible.builtin.assert:
+        that:
+          - _vm_info.ovirt_vms | length == 1
+        fail_msg: >
+          Expected 1 OLVM VM named '{{ olvm_vm_name }}', found
+          {{ _vm_info.ovirt_vms | length }}. Set olvm_vm_name for this host.
+        quiet: true
+
+    - name: "Snapshot | Assert VM is up"
+      ansible.builtin.assert:
+        that:
+          - _vm_info.ovirt_vms[0].status == 'up'
+        fail_msg: "VM '{{ olvm_vm_name }}' status is '{{ _vm_info.ovirt_vms[0].status }}'."
+        quiet: true
+
+    # Existing snapshots lengthen the qcow2 chain; one locked or in preview
+    # means the VM is mid-operation and must not be touched
+    - name: "Snapshot | Read existing snapshots"
+      ovirt.ovirt.ovirt_snapshot_info:
+        auth: "{{ hostvars['localhost'].ovirt_auth }}"
+        vm:   "{{ olvm_vm_name }}"
+      register: _existing
+
+    - name: "Snapshot | Assert existing snapshots are within tolerance"
+      vars:
+        _others:  "{{ _existing.ovirt_snapshots | rejectattr('snapshot_type', 'equalto', 'active') | list }}"
+        _not_ok:  "{{ _existing.ovirt_snapshots | rejectattr('snapshot_status', 'equalto', 'ok') | list }}"
+      ansible.builtin.assert:
+        that:
+          - _not_ok | length == 0
+          - _others | length <= olvm_max_existing_snapshots | int
+        fail_msg: >-
+          {{ ('snapshot(s) not ok: ' ~ (_not_ok | map(attribute='description') | zip(_not_ok | map(attribute='snapshot_status')) | map('join', '=') | join(', ')))
+             if _not_ok | length > 0 else
+             (_others | length | string) ~ ' existing snapshot(s), max ' ~ olvm_max_existing_snapshots ~ ': '
+             ~ (_others | map(attribute='description') | join(', ')) }}
+        quiet: true
+
+    # Step 6 — disk-only snapshot. With qemu-guest-agent running, OLVM freezes
+    # guest filesystems for the duration of the snapshot.
+    - name: "Snapshot | Create pre-patch snapshot"
+      ovirt.ovirt.ovirt_snapshot:
+        auth:        "{{ hostvars['localhost'].ovirt_auth }}"
+        vm_name:     "{{ olvm_vm_name }}"
+        description: "{{ olvm_snapshot_description }}"
+        use_memory:  false
+        state:       present
+        wait:        true
+        timeout:     "{{ olvm_snapshot_timeout }}"
+      register: _snap
+
+    # Step 7 — confirm the engine reports the snapshot as complete
+    - name: "Snapshot | Confirm snapshot status is ok"
+      ovirt.ovirt.ovirt_snapshot_info:
+        auth:        "{{ hostvars['localhost'].ovirt_auth }}"
+        vm:          "{{ olvm_vm_name }}"
+        snapshot_id: "{{ _snap.id }}"
+      register: _snap_info
+      until:
+        - _snap_info.ovirt_snapshots | length == 1
+        - _snap_info.ovirt_snapshots[0].snapshot_status == 'ok'
+      retries: 20
+      delay:   15
+
+    - name: "Snapshot | Record success"
+      ansible.builtin.set_fact:
+        olvm_snapshot_result:
+          status:      created
+          vm:          "{{ olvm_vm_name }}"
+          vm_id:       "{{ _vm_info.ovirt_vms[0].id }}"
+          snapshot_id: "{{ _snap.id }}"
+          description: "{{ olvm_snapshot_description }}"
+          error:       ""
+
+  rescue:
+
+    - name: "Snapshot | Record failure"
+      ansible.builtin.set_fact:
+        olvm_snapshot_result:
+          status:      failed
+          vm:          "{{ olvm_vm_name }}"
+          vm_id:       "{{ _vm_info.ovirt_vms[0].id | default('') }}"
+          snapshot_id: "{{ _snap.id | default('') }}"
+          description: "{{ olvm_snapshot_description }}"
+          error:       "{{ ansible_failed_task.name }}: {{ ansible_failed_result.msg | default('failed') }}"

@@ -1,0 +1,27 @@
+---
+# ------------------------------------------------------------------------------
+# olvm_snapshot : auth
+# Obtains an OLVM API token (sets the ovirt_auth fact). Run once on localhost;
+# other tasks reference hostvars['localhost'].ovirt_auth.
+# ------------------------------------------------------------------------------
+
+- name: "OLVM | Assert connection details are set"
+  ansible.builtin.assert:
+    that:
+      - olvm_url | length > 0
+      - olvm_username | length > 0
+      - olvm_password | length > 0
+    fail_msg: >
+      OVIRT_URL / OVIRT_USERNAME / OVIRT_PASSWORD are not set — attach the OLVM
+      credential to this job template.
+    quiet: true
+
+- name: "OLVM | Authenticate to {{ olvm_url }}"
+  ovirt.ovirt.ovirt_auth:
+    url:      "{{ olvm_url }}"
+    username: "{{ olvm_username }}"
+    password: "{{ olvm_password }}"
+    ca_file:  "{{ olvm_ca_file if olvm_ca_file | length > 0 else omit }}"
+    insecure: "{{ olvm_insecure | bool }}"
+    state:    present
+  no_log: true

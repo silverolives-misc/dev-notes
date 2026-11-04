@@ -1,0 +1,50 @@
+---
+# ------------------------------------------------------------------------------
+# os_patch defaults
+# patch_mode / patch_packages / patch_exclude / patch_*repo are shared with
+# patch_precheck and live in group_vars/all/main.yml.
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Reboot (steps 10, 11)
+#   always       reboot every patched host (the agreed default)
+#   if_required  reboot only when needs-restarting -r says so
+#   never        do not reboot (kernel / glibc updates will not be live)
+# ------------------------------------------------------------------------------
+patch_reboot:            "always"
+patch_reboot_timeout:    1800
+patch_post_reboot_delay: 30
+
+# ------------------------------------------------------------------------------
+# Post-reboot validation (steps 12, 13)
+# ------------------------------------------------------------------------------
+
+# Fail the host if the running kernel is not the grub default after reboot
+patch_fail_on_kernel_mismatch: true
+
+# Optional service / process / command checks. Set per host or group in
+# Device42-driven group_vars, or per job template.
+patch_required_services:   []     # e.g. ["sshd", "chronyd", "oracle-ohasd"]
+patch_required_processes:  []     # pgrep -f patterns, e.g. ["ora_pmon_"]
+patch_validation_commands: []     # [{name: "App health", cmd: "curl -fsS http://localhost:8080/health"}]
+
+# Retries while services come up after boot
+patch_service_retries: 10
+patch_service_delay:   15
+
+# Max updated package names kept per host for the report
+patch_packages_list_max: 300
+
+# ------------------------------------------------------------------------------
+# Internal — outcome record, templated lazily when the result is set
+# ------------------------------------------------------------------------------
+_op_record:
+  stage:            "{{ _op_stage }}"
+  started:          "{{ _op_started }}"
+  finished:         "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+  kernel_before:    "{{ _op_kernel_before }}"
+  kernel_after:     "{{ ansible_kernel }}"
+  rebooted:         "{{ _op_rebooted }}"
+  packages_updated: "{{ _op_updated | length }}"
+  packages:         "{{ _op_updated[:patch_packages_list_max | int] }}"
+  warnings:         "{{ _op_warnings }}"

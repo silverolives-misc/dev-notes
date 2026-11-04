@@ -1,0 +1,186 @@
+---
+# ------------------------------------------------------------------------------
+# 05_report.yml                               Workflow node 6 — steps 14, 15, 16
+#
+# Wired as the ALWAYS / failure target of every earlier node, so the change
+# ticket is updated however far the run got — including a halt at the gate.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ localhost                                                               │
+# │   Merge artifacts → per-host outcome → overall outcome →                │
+# │   HTML report → Jira comment + attachment (+ optional transition)       │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Inputs (any may be missing, depending on where the workflow stopped):
+#   change_ticket (survey), patch_change, patch_scope, patch_precheck,
+#   patch_snapshots, patch_results
+#
+# Per-host outcome:
+#   excluded | precheck_failed | no_updates | snapshot_failed |
+#   patched | patch_failed | not_attempted
+#
+# Overall outcome:
+#   HALTED   stopped before any host was assessed (gate / scope / precheck job)
+#   SUCCESS  every in-scope host is patched or had nothing to install
+#   PARTIAL  some hosts patched, some not
+#   FAILED   no host patched and at least one failure
+# ------------------------------------------------------------------------------
+
+- name: "Report | Record outcome, report and update Jira"
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    _ticket:    "{{ patch_change.ticket | default(change_ticket | default('')) }}"
+    _scope:     "{{ patch_scope     | default([]) }}"
+    _precheck:  "{{ patch_precheck  | default({}) }}"
+    _snapshots: "{{ patch_snapshots | default({}) }}"
+    _results:   "{{ patch_results   | default({}) }}"
+    _report_path: "{{ report_dir | default('/tmp') }}/patch_report_{{ _ticket }}_{{ ansible_date_time.iso8601_basic_short }}.html"
+
+  tasks:
+
+    - name: "Report | Assert a change ticket is known"
+      ansible.builtin.assert:
+        that:
+          - _ticket | length > 0
+        fail_msg: "No change ticket — nothing to report against."
+        quiet: true
+
+    # --------------------------------------------------------------------------
+    # Step 14 — per-host outcome
+    # --------------------------------------------------------------------------
+
+    - name: "Report | Build per-host outcome"
+      vars:
+        _pc: "{{ _precheck[item.host]  | default({}) }}"
+        _sn: "{{ _snapshots[item.host] | default({}) }}"
+        _pr: "{{ _results[item.host]   | default({}) }}"
+        _outcome: >-
+          {{
+            'excluded'        if not item.in_scope
+            else 'precheck_failed' if _pc.status | default('') == 'failed'
+            else 'no_updates'      if _pc.status | default('') == 'no_updates'
+            else 'snapshot_failed' if _sn.status | default('') == 'failed'
+            else 'patched'         if _pr.status | default('') == 'success'
+            else 'patch_failed'    if _pr.status | default('') == 'failed'
+            else 'not_attempted'
+          }}
+        _detail: >-
+          {{
+            item.reason                                 if not item.in_scope
+            else _pc.reasons | default([]) | join('; ') if _outcome == 'precheck_failed'
+            else _sn.error | default('')                if _outcome == 'snapshot_failed'
+            else _pr.error | default('')                if _outcome == 'patch_failed'
+            else 'run stopped before this host'         if _outcome == 'not_attempted'
+            else ((['NO SNAPSHOT — test mode'] if _sn.status | default('') == 'skipped_test_mode' else [])
+                  + _pc.warnings | default([]) + _pr.warnings | default([])) | join('; ')
+          }}
+      ansible.builtin.set_fact:
+        _rows: >-
+          {{ _rows | default([]) + [{
+               'host':          item.host,
+               'outcome':       _outcome,
+               'detail':        _detail,
+               'updates':       _pc.updates_count | default(0) | int,
+               'installed':     _pr.packages_updated | default(0) | int,
+               'packages':      _pr.packages | default([]),
+               'kernel_before': _pr.kernel_before | default(_pc.kernel | default('')),
+               'kernel_after':  _pr.kernel_after | default(''),
+               'rebooted':      _pr.rebooted | default(false),
+               'vm':            _sn.vm | default(''),
+               'snapshot_id':   _sn.snapshot_id | default(''),
+               'snapshot':      _sn.description | default(''),
+               'test_mode':     _sn.status | default('') == 'skipped_test_mode',
+             }] }}
+      loop: "{{ _scope }}"
+      loop_control:
+        label: "{{ item.host }}"
+
+    - name: "Report | Work out overall outcome"
+      vars:
+        _in:      "{{ _rows | default([]) | rejectattr('outcome', 'equalto', 'excluded') | list }}"
+        _good:    "{{ _in | selectattr('outcome', 'in', ['patched', 'no_updates']) | list }}"
+        _patched: "{{ _in | selectattr('outcome', 'equalto', 'patched') | list }}"
+      ansible.builtin.set_fact:
+        _rows: "{{ _rows | default([]) }}"
+        _overall: >-
+          {{
+            'HALTED'    if _in | length == 0
+            else 'SUCCESS' if _good | length == _in | length
+            else 'PARTIAL' if _patched | length > 0
+            else 'FAILED'
+          }}
+        _retain_until: >-
+          {{ '%Y-%m-%d' | strftime(ansible_date_time.epoch | int + snapshot_retention_days | int * 86400) }}
+
+    - name: "Report | Record patch_report"
+      ansible.builtin.set_fact:
+        patch_report:
+          ticket:       "{{ _ticket }}"
+          overall:      "{{ _overall }}"
+          generated:    "{{ ansible_date_time.iso8601 }}"
+          retain_until: "{{ _retain_until }}"
+          counts: >-
+            {% set ns = namespace(d={}) %}{% for o in _rows | map(attribute='outcome') %}{% set ns.d = ns.d | combine({o: ns.d.get(o, 0) + 1}) %}{% endfor %}{{ ns.d }}
+          hosts:        "{{ _rows }}"
+
+    # --------------------------------------------------------------------------
+    # Step 15 — report
+    # --------------------------------------------------------------------------
+
+    - name: "Report | Render HTML report"
+      ansible.builtin.template:
+        src:  templates/patch_report.html.j2
+        dest: "{{ _report_path }}"
+        mode: "0644"
+
+    - name: "Report | Publish summary to workflow"
+      ansible.builtin.set_stats:
+        data:
+          # package lists stay in the HTML report to keep artifacts small
+          patch_report: "{{ patch_report | combine({'hosts': _rows | map('combine', {'packages': []}) | list}) }}"
+        per_host: false
+        aggregate: false
+
+    # --------------------------------------------------------------------------
+    # Step 16 — Jira
+    # --------------------------------------------------------------------------
+
+    - name: "Report | Render Jira comment"
+      ansible.builtin.set_fact:
+        _comment: "{{ lookup('ansible.builtin.template', 'templates/jira_comment.j2') }}"
+
+    - name: "Report | Comment on change ticket"
+      ansible.builtin.include_role:
+        name: jira_api
+        tasks_from: comment
+      vars:
+        jira_issue_key:    "{{ _ticket }}"
+        jira_comment_body: "{{ _comment }}"
+
+    - name: "Report | Attach HTML report to change ticket"
+      ansible.builtin.include_role:
+        name: jira_api
+        tasks_from: attach
+      vars:
+        jira_issue_key:       "{{ _ticket }}"
+        jira_attachment_path: "{{ _report_path }}"
+      when: jira_attach_report | bool
+
+    - name: "Report | Transition change ticket"
+      ansible.builtin.include_role:
+        name: jira_api
+        tasks_from: transition
+      vars:
+        jira_issue_key:     "{{ _ticket }}"
+        jira_transition_id: "{{ jira_transition_on_success }}"
+      when:
+        - _overall == 'SUCCESS'
+        - jira_transition_on_success | string | length > 0
+
+    - name: "Report | Summary"
+      ansible.builtin.debug:
+        msg:
+          - "{{ _ticket }}: {{ _overall }}"
+          - "{{ _rows | map(attribute='host') | zip(_rows | map(attribute='outcome')) | map('join', ' — ') | list }}"

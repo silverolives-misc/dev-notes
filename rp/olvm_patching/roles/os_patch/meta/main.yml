@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  role_name: os_patch
+  author: your_team
+  description: >
+    Applies approved dnf updates to Oracle Linux, reboots, waits for the host,
+    validates SSH / kernel / services and records the outcome. Every outcome is
+    published via set_stats as patch_results.<host> before the role returns,
+    so results survive even if the play is aborted by max_fail_percentage.
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+
+dependencies: []

@@ -1,0 +1,134 @@
+---
+# ------------------------------------------------------------------------------
+# 06_snapshot_cleanup.yml                         Cleanup workflow — steps 18, 19
+#
+# Separate scheduled workflow:
+#   [dry run] → [approval node] → [delete]
+# The approver reviews the dry-run job output (the list of snapshots that will
+# be deleted) before approving.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ localhost                                                               │
+# │   OLVM auth → list VMs → list ANSIBLE-PATCH|* snapshots per VM →        │
+# │   parse ticket + timestamp from description → older than retention →   │
+# │   dry run: report only | live: delete + Jira comment per ticket         │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Extra-vars:
+#   cleanup_dry_run          true    list only; set false on the delete job
+#   snapshot_retention_days  7       (group_vars)
+#   cleanup_ticket           ""      limit to snapshots from one change
+#   cleanup_vm_search        ""      OLVM search to narrow VMs, e.g. "cluster=Prod"
+#   cleanup_jira_comment     true    note deletions on each change ticket
+#
+# Only snapshots whose description matches the exact format written by
+# 03_snapshot.yml are considered — manual snapshots are never touched.
+# ------------------------------------------------------------------------------
+
+- name: "Cleanup | Expire pre-patch snapshots"
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    cleanup_dry_run:      true
+    cleanup_ticket:       ""
+    cleanup_vm_search:    ""
+    cleanup_jira_comment: true
+    _desc_regex: "^{{ snapshot_description_prefix | regex_escape }}\\|([A-Z][A-Z0-9_]+-[0-9]+)\\|([0-9]{8}T[0-9]{6}Z)$"
+    # Stamps are fixed-width UTC (YYYYMMDDTHHMMSSZ), so string comparison orders them correctly
+    _cutoff:     "{{ '%Y%m%dT%H%M%SZ' | strftime(ansible_date_time.epoch | int - snapshot_retention_days | int * 86400, utc=true) }}"
+
+  tasks:
+
+    - name: "Cleanup | Authenticate to OLVM"
+      ansible.builtin.include_role:
+        name: olvm_snapshot
+        tasks_from: auth
+
+    - name: "Cleanup | List VMs"
+      ovirt.ovirt.ovirt_vm_info:
+        auth:    "{{ ovirt_auth }}"
+        pattern: "{{ cleanup_vm_search }}"
+      register: _vms
+
+    - name: "Cleanup | List patching snapshots per VM"
+      ovirt.ovirt.ovirt_snapshot_info:
+        auth:        "{{ ovirt_auth }}"
+        vm:          "{{ item.name }}"
+        description: "{{ snapshot_description_prefix }}|*"
+      loop: "{{ _vms.ovirt_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _snaps
+
+    - name: "Cleanup | Parse and age snapshots"
+      vars:
+        _m: "{{ item.1.description | default('') | regex_search(_desc_regex, '\\1', '\\2') | default([], true) }}"
+      ansible.builtin.set_fact:
+        _candidates: >-
+          {{ _candidates | default([]) + [{
+               'vm':          item.0.item.name,
+               'snapshot_id': item.1.id,
+               'description': item.1.description,
+               'ticket':      _m[0],
+               'created':     _m[1],
+               'age_days':    (now(utc=true) - (_m[1] | to_datetime('%Y%m%dT%H%M%SZ'))).days,
+             }] }}
+      loop: "{{ _snaps.results | subelements('ovirt_snapshots', skip_missing=true) }}"
+      loop_control:
+        label: "{{ item.0.item.name }} {{ item.1.description }}"
+      when:
+        - _m | length == 2
+        - _m[1] < _cutoff
+        - cleanup_ticket | length == 0 or _m[0] == cleanup_ticket
+
+    - name: "Cleanup | Set expired list"
+      ansible.builtin.set_fact:
+        _expired: "{{ _candidates | default([]) | sort(attribute='created') }}"
+
+    - name: "Cleanup | Snapshots past {{ snapshot_retention_days }}-day retention"
+      ansible.builtin.debug:
+        msg: >-
+          {{ _expired | length }} snapshot(s){{ ' — DRY RUN, nothing deleted' if cleanup_dry_run | bool else ' — deleting' }}:
+          {{ _expired | map(attribute='vm') | zip(_expired | map(attribute='ticket'), _expired | map(attribute='age_days'))
+             | map('join', ' / ') | list }}
+
+    - name: "Cleanup | Publish expired list"
+      ansible.builtin.set_stats:
+        data:
+          snapshot_cleanup:
+            dry_run: "{{ cleanup_dry_run | bool }}"
+            expired: "{{ _expired }}"
+        per_host: false
+        aggregate: false
+
+    - name: "Cleanup | Delete expired snapshots"
+      ansible.builtin.include_role:
+        name: olvm_snapshot
+        tasks_from: delete
+      loop: "{{ _expired }}"
+      loop_control:
+        loop_var: _del
+        label: "{{ _del.vm }} {{ _del.description }}"
+      when: not cleanup_dry_run | bool
+
+    - name: "Cleanup | Note deletions on change tickets"
+      ansible.builtin.include_role:
+        name: jira_api
+        tasks_from: comment
+      vars:
+        _for_ticket: "{{ _expired | selectattr('ticket', 'equalto', item) | list }}"
+        jira_issue_key: "{{ item }}"
+        jira_comment_body: >-
+          Pre-patch OLVM snapshot(s) deleted after {{ snapshot_retention_days }}-day retention
+          (AAP job {{ tower_job_id | default(awx_job_id | default('n/a')) }}):
+          {{ _for_ticket | map(attribute='vm') | join(', ') }}
+      loop: "{{ _expired | map(attribute='ticket') | unique | list }}"
+      when:
+        - not cleanup_dry_run | bool
+        - cleanup_jira_comment | bool
+
+    - name: "Cleanup | Revoke OLVM token"
+      ansible.builtin.include_role:
+        name: olvm_snapshot
+        tasks_from: logout

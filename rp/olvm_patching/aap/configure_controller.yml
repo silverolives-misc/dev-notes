@@ -1,0 +1,251 @@
+---
+# ------------------------------------------------------------------------------
+# aap/configure_controller.yml
+# Configuration-as-code for the patching workflow on the Azure managed AAP.
+#
+# Creates: credential types, the Azure Key Vault lookup credential, the
+# Machine / Jira / Device42 / OLVM credentials with their secret fields linked
+# to Key Vault, execution environment, project, Device42 inventory + source,
+# job templates, the "OS Patching" workflow and the "OLVM Snapshot Cleanup"
+# workflow with its approval node and schedule.
+#
+# No secret values pass through this playbook except the Key Vault service
+# principal's client secret on first run (AZURE_KV_CLIENT_SECRET).
+#
+# Run from a workstation or a bootstrap job template:
+#   export CONTROLLER_HOST=https://<aap-gateway>  CONTROLLER_OAUTH_TOKEN=...
+#   export AZURE_KV_CLIENT_SECRET=...      # first run / rotation only
+#   ansible-playbook aap/configure_controller.yml
+#
+# VERIFY: workflow_nodes syntax tracks the ansible.controller collection
+# version — check against the installed collection's docs before first use.
+# ------------------------------------------------------------------------------
+
+- name: "AAP | Configure OS patching workflow"
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - vars.yml
+    - credential_types.yml
+
+  module_defaults:
+    group/ansible.controller.controller:
+      validate_certs: true
+
+  tasks:
+
+    # --------------------------------------------------------------------------
+    # Foundations
+    # --------------------------------------------------------------------------
+
+    - name: "AAP | Credential types"
+      ansible.controller.credential_type:
+        name:        "{{ item.name }}"
+        description: "{{ item.description }}"
+        kind:        cloud
+        inputs:      "{{ item.inputs }}"
+        injectors:   "{{ item.injectors }}"
+      loop: "{{ patching_credential_types }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # --------------------------------------------------------------------------
+    # Credentials — secrets resolved from Azure Key Vault at job launch
+    # --------------------------------------------------------------------------
+
+    - name: "AAP | Azure Key Vault lookup credential"
+      ansible.controller.credential:
+        name:            "{{ aap_cred_keyvault }}"
+        organization:    "{{ aap_org }}"
+        credential_type: "Microsoft Azure Key Vault"
+        inputs:
+          url:        "{{ aap_kv_url }}"
+          tenant:     "{{ aap_kv_tenant }}"
+          client:     "{{ aap_kv_client_id }}"
+          secret:     "{{ lookup('ansible.builtin.env', 'AZURE_KV_CLIENT_SECRET') }}"
+          cloud_name: "{{ aap_kv_cloud }}"
+      no_log: true
+      when: lookup('ansible.builtin.env', 'AZURE_KV_CLIENT_SECRET') | length > 0
+
+    # update_secrets: false — never blank a field that Key Vault supplies
+    - name: "AAP | Patching credentials (non-secret fields)"
+      ansible.controller.credential:
+        name:            "{{ item.name }}"
+        organization:    "{{ aap_org }}"
+        credential_type: "{{ item.credential_type }}"
+        inputs:          "{{ item.inputs }}"
+        update_secrets:  false
+      loop: "{{ aap_credentials }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "AAP | Link secret fields to Key Vault"
+      ansible.controller.credential_input_source:
+        target_credential: "{{ item.credential }}"
+        input_field_name:  "{{ item.field }}"
+        source_credential: "{{ aap_cred_keyvault }}"
+        metadata:
+          secret_field:   "{{ item.secret }}"
+          secret_version: ""
+        state: present
+      loop: "{{ aap_credential_secrets | rejectattr('enabled', 'defined') | list
+                + aap_credential_secrets | selectattr('enabled', 'defined') | selectattr('enabled') | list }}"
+      loop_control:
+        label: "{{ item.credential }} / {{ item.field }} ← {{ item.secret }}"
+
+    - name: "AAP | Execution environment"
+      ansible.controller.execution_environment:
+        name:         "{{ aap_ee_name }}"
+        image:        "{{ aap_ee_image }}"
+        pull:         missing
+        organization: "{{ aap_org }}"
+
+    - name: "AAP | Project"
+      ansible.controller.project:
+        name:                 "{{ aap_project }}"
+        organization:         "{{ aap_org }}"
+        scm_type:             git
+        scm_url:              "{{ aap_scm_url }}"
+        scm_branch:           "{{ aap_scm_branch }}"
+        scm_credential:       "{{ aap_scm_credential | default(omit, true) }}"
+        scm_update_on_launch: true
+        default_environment:  "{{ aap_ee_name }}"
+        wait:                 true
+
+    - name: "AAP | Device42 inventory"
+      ansible.controller.inventory:
+        name:         "{{ aap_inventory }}"
+        organization: "{{ aap_org }}"
+
+    - name: "AAP | Device42 inventory source"
+      ansible.controller.inventory_source:
+        name:              "{{ aap_inventory_source }}"
+        inventory:         "{{ aap_inventory }}"
+        organization:      "{{ aap_org }}"
+        source:            scm
+        source_project:    "{{ aap_project }}"
+        source_path:       inventory/device42.d42.yml
+        credential:        "{{ aap_cred_device42 }}"
+        execution_environment: "{{ aap_ee_name }}"
+        overwrite:         true
+        update_on_launch:  false     # the workflow syncs explicitly (step 2)
+
+    # --------------------------------------------------------------------------
+    # Job templates
+    # --------------------------------------------------------------------------
+
+    - name: "AAP | Job templates"
+      ansible.controller.job_template:
+        name:                  "{{ item.name }}"
+        organization:          "{{ aap_org }}"
+        project:               "{{ aap_project }}"
+        playbook:              "{{ item.playbook }}"
+        inventory:             "{{ aap_inventory }}"
+        credentials:           "{{ item.credentials }}"
+        execution_environment: "{{ aap_ee_name }}"
+        extra_vars:            "{{ item.extra_vars | default({}) }}"
+        forks:                 "{{ item.forks | default(omit) }}"
+        timeout:               "{{ item.timeout | default(0) }}"
+      loop: "{{ aap_job_templates }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # --------------------------------------------------------------------------
+    # OS Patching workflow
+    #
+    #   gate ─ok─► sync ─ok─► precheck ─ok─► snapshot ─ok─► patch ─always─► report
+    #     └──fail──────┴──fail─────┴──fail───────┴──fail────────────────────►┘
+    #
+    # report converges ANY parent, so it runs once whichever path reached it.
+    # --------------------------------------------------------------------------
+
+    - name: "AAP | OS Patching workflow"
+      ansible.controller.workflow_job_template:
+        name:            "{{ aap_wf_patching }}"
+        organization:    "{{ aap_org }}"
+        inventory:       "{{ aap_inventory }}"
+        allow_simultaneous: false
+        survey_enabled:  true
+        survey_spec:     "{{ lookup('ansible.builtin.file', 'survey_patching.json') | from_json }}"
+        destroy_current_nodes: true
+        workflow_nodes:
+          - identifier: gate
+            unified_job_template: { name: "{{ aap_jt.gate }}", type: job_template, organization: { name: "{{ aap_org }}" } }
+            related:
+              success_nodes: [{ identifier: sync }]
+              failure_nodes: [{ identifier: report }]
+
+          - identifier: sync
+            unified_job_template:
+              name: "{{ aap_inventory_source }}"
+              type: inventory_source
+              inventory: { name: "{{ aap_inventory }}", organization: { name: "{{ aap_org }}" } }
+            related:
+              success_nodes: [{ identifier: precheck }]
+              failure_nodes: [{ identifier: report }]
+
+          - identifier: precheck
+            unified_job_template: { name: "{{ aap_jt.precheck }}", type: job_template, organization: { name: "{{ aap_org }}" } }
+            related:
+              success_nodes: [{ identifier: snapshot }]
+              failure_nodes: [{ identifier: report }]
+
+          - identifier: snapshot
+            unified_job_template: { name: "{{ aap_jt.snapshot }}", type: job_template, organization: { name: "{{ aap_org }}" } }
+            related:
+              success_nodes: [{ identifier: patch }]
+              failure_nodes: [{ identifier: report }]
+
+          - identifier: patch
+            unified_job_template: { name: "{{ aap_jt.patch }}", type: job_template, organization: { name: "{{ aap_org }}" } }
+            related:
+              always_nodes: [{ identifier: report }]
+
+          - identifier: report
+            unified_job_template: { name: "{{ aap_jt.report }}", type: job_template, organization: { name: "{{ aap_org }}" } }
+
+    # --------------------------------------------------------------------------
+    # Snapshot cleanup workflow (steps 18, 19)
+    #   dry run ─ok─► approval ─approved─► delete
+    # --------------------------------------------------------------------------
+
+    - name: "AAP | OLVM Snapshot Cleanup workflow"
+      ansible.controller.workflow_job_template:
+        name:            "{{ aap_wf_cleanup }}"
+        organization:    "{{ aap_org }}"
+        inventory:       "{{ aap_inventory }}"
+        allow_simultaneous: false
+        destroy_current_nodes: true
+        workflow_nodes:
+          - identifier: dryrun
+            unified_job_template: { name: "{{ aap_jt.cleanup_dryrun }}", type: job_template, organization: { name: "{{ aap_org }}" } }
+            related:
+              success_nodes: [{ identifier: approve }]
+
+          - identifier: approve
+            unified_job_template:
+              name:        "Approve OLVM snapshot deletion"
+              description: "Review the dry-run job output, then approve to delete the listed snapshots."
+              type:        workflow_approval
+              timeout:     "{{ aap_cleanup_approval_timeout }}"
+            related:
+              success_nodes: [{ identifier: delete }]
+
+          - identifier: delete
+            unified_job_template: { name: "{{ aap_jt.cleanup_delete }}", type: job_template, organization: { name: "{{ aap_org }}" } }
+
+    - name: "AAP | Approvers can approve cleanup"
+      ansible.controller.role:
+        team:               "{{ aap_cleanup_approver_team }}"
+        role:               approval
+        workflows:          ["{{ aap_wf_cleanup }}"]
+      when: aap_cleanup_approver_team | default('') | length > 0
+
+    - name: "AAP | Cleanup schedule"
+      ansible.controller.schedule:
+        name:                   "{{ aap_wf_cleanup }} — daily"
+        unified_job_template:   "{{ aap_wf_cleanup }}"
+        organization:           "{{ aap_org }}"
+        rrule:                  "{{ aap_cleanup_rrule }}"
+        enabled:                true

@@ -1,0 +1,175 @@
+---
+# ------------------------------------------------------------------------------
+# 01_change_gate.yml                                      Workflow node 1 — step 1
+#
+# Confirms the Jira change is approved and inside its window, and works out
+# which patch group (and optionally which hosts) the change covers.
+# Fails — halting the workflow — if any check does not pass.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ localhost                                                               │
+# │   Read issue → assert issue type + approved status → assert window →    │
+# │   resolve patch group + ticket host list → publish patch_change         │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Survey / extra-vars:
+#   change_ticket   (required)  Jira key, e.g. CHG-1234
+#   patch_group     (optional)  Overrides the patch group field on the ticket
+#
+# Publishes (set_stats → passed to later workflow nodes as extra-vars):
+#   patch_change: { ticket, summary, status, patch_group, ticket_hosts,
+#                   window_start, window_end }
+# ------------------------------------------------------------------------------
+
+- name: "Change gate | Validate Jira change record"
+  hosts: localhost
+  gather_facts: true      # ansible_date_time for window check
+
+  tasks:
+
+    - name: "Change gate | Assert inputs and Jira connection details"
+      ansible.builtin.assert:
+        that:
+          - change_ticket | default('') is match('^[A-Z][A-Z0-9_]+-[0-9]+$')
+          - jira_url | length > 0
+          - jira_token | length > 0
+        fail_msg: >
+          change_ticket must be a Jira key (e.g. CHG-1234) and the Jira
+          credential must be attached to this job template.
+        quiet: true
+
+    - name: "Change gate | Read change issue"
+      ansible.builtin.include_role:
+        name: jira_api
+        tasks_from: get_issue
+      vars:
+        jira_issue_key: "{{ change_ticket }}"
+
+    # --------------------------------------------------------------------------
+    # Approval
+    # --------------------------------------------------------------------------
+
+    - name: "Change gate | Extract status and type"
+      ansible.builtin.set_fact:
+        _issue_type:   "{{ jira_issue.fields.issuetype.name }}"
+        _issue_status: "{{ jira_issue.fields.status.name }}"
+
+    - name: "Change gate | Assert issue is a change record"
+      ansible.builtin.assert:
+        that:
+          - _issue_type in jira_change_issue_types
+        fail_msg: >
+          {{ change_ticket }} is a '{{ _issue_type }}', not one of
+          {{ jira_change_issue_types }}. Halting.
+
+    - name: "Change gate | Assert change is approved"
+      ansible.builtin.assert:
+        that:
+          - _issue_status in jira_approved_statuses
+        fail_msg: >
+          {{ change_ticket }} status is '{{ _issue_status }}'. Patching may only
+          start from {{ jira_approved_statuses }}. Halting.
+        success_msg: "{{ change_ticket }} is '{{ _issue_status }}' — approved."
+
+    # --------------------------------------------------------------------------
+    # Change window
+    # Jira datetime fields look like 2026-10-22T10:00:00.000+0000
+    # --------------------------------------------------------------------------
+
+    - name: "Change gate | Resolve change window"
+      ansible.builtin.set_fact:
+        _window_start: "{{ jira_issue.fields[jira_field_window_start] | default('', true) if jira_field_window_start else '' }}"
+        _window_end:   "{{ jira_issue.fields[jira_field_window_end]   | default('', true) if jira_field_window_end   else '' }}"
+
+    - name: "Change gate | Assert change window is open"
+      vars:
+        _fmt:   "%Y-%m-%dT%H:%M:%S.%f%z"
+        _now:   "{{ ansible_date_time.epoch | int }}"
+        _grace: "{{ change_window_grace_minutes | int * 60 }}"
+        _start: "{{ (_window_start | to_datetime(_fmt)).timestamp() | int }}"
+        _end:   "{{ (_window_end   | to_datetime(_fmt)).timestamp() | int }}"
+      ansible.builtin.assert:
+        that:
+          - _now | int >= _start | int - _grace | int
+          - _now | int <= _end | int
+        fail_msg: >
+          Outside the change window ({{ _window_start }} → {{ _window_end }}).
+          Now: {{ ansible_date_time.iso8601 }}. Halting.
+        success_msg: "Inside change window {{ _window_start }} → {{ _window_end }}."
+      when:
+        - enforce_change_window | bool
+        - _window_start | length > 0
+        - _window_end | length > 0
+
+    - name: "Change gate | Warn when window is not enforced or not set"
+      ansible.builtin.debug:
+        msg: >
+          Change window NOT checked (enforce_change_window={{ enforce_change_window }},
+          start={{ _window_start or 'unset' }}, end={{ _window_end or 'unset' }}).
+      when: >-
+        not enforce_change_window | bool
+        or _window_start | length == 0
+        or _window_end | length == 0
+
+    # --------------------------------------------------------------------------
+    # Patch group and host list (inputs to step 2 / step 5)
+    # Fields may be plain text, a select option ({value: ...}) or a multi-select.
+    # --------------------------------------------------------------------------
+
+    - name: "Change gate | Resolve patch group and ticket host list"
+      vars:
+        _pg_raw:    "{{ jira_issue.fields[jira_field_patch_group] | default('') if jira_field_patch_group else '' }}"
+        _hosts_raw: "{{ jira_issue.fields[jira_field_hosts] | default('') if jira_field_hosts else '' }}"
+      ansible.builtin.set_fact:
+        _patch_group: >-
+          {{
+            patch_group | default('', true)
+            or (_pg_raw.value if _pg_raw is mapping else (_pg_raw | default('', true) | string))
+          }}
+        _ticket_hosts: >-
+          {{
+            (
+              (_hosts_raw | map(attribute='value') | list)
+                if (_hosts_raw is sequence and _hosts_raw is not string and _hosts_raw | length > 0 and _hosts_raw[0] is mapping)
+              else (
+                _hosts_raw
+                  if (_hosts_raw is sequence and _hosts_raw is not string)
+                else (_hosts_raw | default('', true) | string | regex_replace('[\s,;]+', ' ')).split()
+              )
+            )
+            | map('trim') | select | map('lower') | unique | list
+          }}
+
+    - name: "Change gate | Assert a patch group was resolved"
+      ansible.builtin.assert:
+        that:
+          - _patch_group | trim | length > 0
+        fail_msg: >
+          No patch group on {{ change_ticket }} (field '{{ jira_field_patch_group }}')
+          and none supplied via the patch_group survey field.
+
+    - name: "Change gate | Build patch_change record"
+      ansible.builtin.set_fact:
+        patch_change:
+          ticket:       "{{ change_ticket }}"
+          summary:      "{{ jira_issue.fields.summary }}"
+          status:       "{{ _issue_status }}"
+          patch_group:  "{{ _patch_group | trim }}"
+          ticket_hosts: "{{ _ticket_hosts }}"
+          window_start: "{{ _window_start }}"
+          window_end:   "{{ _window_end }}"
+          gate_time:    "{{ ansible_date_time.iso8601 }}"
+
+    - name: "Change gate | Publish patch_change to workflow"
+      ansible.builtin.set_stats:
+        data:
+          patch_change: "{{ patch_change }}"
+        per_host: false
+
+    - name: "Change gate | Summary"
+      ansible.builtin.debug:
+        msg:
+          - "Ticket:       {{ patch_change.ticket }} — {{ patch_change.summary }}"
+          - "Status:       {{ patch_change.status }}"
+          - "Patch group:  {{ patch_change.patch_group }}"
+          - "Ticket hosts: {{ patch_change.ticket_hosts | length }} listed{{ '' if patch_change.ticket_hosts else ' (group membership alone defines scope)' }}"

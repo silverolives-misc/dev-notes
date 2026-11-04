@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: jira_api
+  author: your_team
+  description: >
+    Thin wrappers over the Jira REST v2 API (read issue, comment, attach,
+    transition). Call with tasks_from. Works with Jira Cloud (basic auth with
+    email + API token) and Data Center (bearer PAT).
+  license: MIT
+  min_ansible_version: "2.16"
+
+dependencies: []

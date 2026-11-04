@@ -1,0 +1,31 @@
+---
+# ------------------------------------------------------------------------------
+# jira_api : get_issue
+# Reads one issue. Result in jira_issue (the REST "issue" object).
+#
+# Inputs: jira_issue_key
+# ------------------------------------------------------------------------------
+
+- name: "Jira | Read issue {{ jira_issue_key }}"
+  ansible.builtin.uri:
+    url:            "{{ jira_url }}/rest/api/2/issue/{{ jira_issue_key | urlencode }}"
+    method:         GET
+    headers:        "{{ _jira_headers }}"
+    url_username:   "{{ jira_user if jira_auth_type == 'basic' else omit }}"
+    url_password:   "{{ jira_token if jira_auth_type == 'basic' else omit }}"
+    force_basic_auth: "{{ jira_auth_type == 'basic' }}"
+    return_content: true
+    status_code:    [200, 404]
+  register: _jira_get
+  no_log: "{{ jira_no_log }}"
+
+- name: "Jira | Assert issue exists"
+  ansible.builtin.assert:
+    that:
+      - _jira_get.status == 200
+    fail_msg: "Jira issue '{{ jira_issue_key }}' not found or not visible to the automation account."
+    quiet: true
+
+- name: "Jira | Store issue"
+  ansible.builtin.set_fact:
+    jira_issue: "{{ _jira_get.json }}"

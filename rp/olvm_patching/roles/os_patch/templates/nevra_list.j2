@@ -1,0 +1,6 @@
+{# Flattens ansible_facts.packages into a YAML list of name-version-release.arch #}
+{% for name, pkgs in ansible_facts.packages | dictsort %}
+{% for p in pkgs %}
+- "{{ name }}-{{ p.version }}-{{ p.release }}.{{ p.arch }}"
+{% endfor %}
+{% endfor %}

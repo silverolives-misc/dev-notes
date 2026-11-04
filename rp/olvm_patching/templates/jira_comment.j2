@@ -1,0 +1,33 @@
+{# Jira wiki markup — REST v2 comment body #}
+{% set colour = {'SUCCESS': 'green', 'PARTIAL': 'orange', 'FAILED': 'red', 'HALTED': 'red'}[patch_report.overall] %}
+h3. OS patching: {color:{{ colour }}}*{{ patch_report.overall }}*{color}
+
+||Item||Value||
+|Change|{{ patch_report.ticket }}|
+|Patch group|{{ patch_change.patch_group | default('n/a') }}|
+|Patch mode|{{ patch_mode }}{{ ' (exclude: ' ~ (patch_exclude | join(', ')) ~ ')' if patch_exclude else '' }}|
+|Completed|{{ patch_report.generated }}|
+|AAP job|{{ tower_job_id | default(awx_job_id | default('n/a')) }}|
+{% if patch_report.hosts | selectattr('test_mode') | list | length > 0 %}
+
+{panel:bgColor=#ffebe6}*TEST MODE — {{ patch_report.hosts | selectattr('test_mode') | list | length }} host(s) patched WITHOUT a pre-patch snapshot.* Development run only.{panel}
+{% endif %}
+{% if patch_report.overall == 'HALTED' %}
+
+*The run stopped before any host was assessed.* Check the AAP workflow job for the failing step (change gate, inventory sync or pre-check).
+{% if patch_change is not defined %}
+The change gate did not pass — the ticket may not be in an approved status ({{ jira_approved_statuses | join(', ') }}) or the change window is closed.
+{% endif %}
+{% else %}
+
+||Host||Outcome||Packages||Kernel||Snapshot||Detail||
+{% for r in patch_report.hosts %}
+|{{ r.host }}|{{ r.outcome }}|{{ r.installed if r.outcome == 'patched' else r.updates }}|{{ r.kernel_before }}{{ (' → ' ~ r.kernel_after) if r.kernel_after and r.kernel_after != r.kernel_before else '' }}|{{ 'yes' if r.snapshot_id else '-' }}|{{ (r.detail | replace('|', '/')) or '-' }}|
+{% endfor %}
+{% if patch_report.hosts | selectattr('snapshot_id') | list | length > 0 %}
+
+Pre-patch OLVM snapshots are retained until *{{ patch_report.retain_until }}* ({{ snapshot_retention_days }} days). Deletion runs through the approval-gated cleanup workflow.
+{% endif %}
+{% endif %}
+
+_{{ 'Full report attached. ' if jira_attach_report | bool else '' }}Posted by Ansible Automation Platform._
