@@ -39,7 +39,8 @@
   gather_facts: false
 
   vars:
-    _group_name: "{{ (patch_group_prefix ~ patch_change.patch_group) | regex_replace('[^A-Za-z0-9_]', '_') }}"
+    #_group_name: "{{ (patch_group_prefix ~ patch_change.patch_group) | regex_replace('[^A-Za-z0-9_]', '_') }}"
+    _group_name: "{{ patch_change.patch_group | trim }}"
     _members:    "{{ groups[_group_name] | default([]) }}"
     _excluded:   "{{ groups[patch_exclude_group] | default([]) }}"
     _ticket:     "{{ patch_change.ticket_hosts | map('regex_replace', '\\..*$', '') | map('lower') | list }}"

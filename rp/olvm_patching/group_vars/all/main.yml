@@ -19,6 +19,7 @@ jira_auth_type: "basic"
 
 # Issue types that are accepted as a change record
 jira_change_issue_types:
+  - "[System] Change"
   - "Change"
 
 # Statuses in which patching is permitted to start (step 1)
@@ -43,7 +44,8 @@ change_window_grace_minutes:  15
 jira_attach_report: true
 
 # Optional transition ID to apply after a fully successful run ("" = none)
-jira_transition_on_success: ""
+jira_transition_on_success: "9028"
+jira_transition_on_failure: "9152"
 
 # ------------------------------------------------------------------------------
 # Device42 inventory (step 2)
@@ -97,4 +99,9 @@ snapshot_retention_days: 7
 # Never set this on a production job template.
 # ------------------------------------------------------------------------------
 snapshot_test_mode:             false
-snapshot_test_mode_group_regex: "^(dev|test|lab)([_-]|$)"
+snapshot_test_mode_group_regex: "^(service|dev|test|lab)([_-]|$)"
+
+
+ansible_user: opc
+ansible_ssh_private_key_file: /home/opc/.ssh/ansible
+ansible_python_interpreter: /usr/bin/python3.9

@@ -1,0 +1,4 @@
+---
+patch_results:
+  ansible_client:
+    status: success

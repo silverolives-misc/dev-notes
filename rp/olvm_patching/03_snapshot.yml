@@ -45,7 +45,9 @@
           - patch_change is defined
           - patch_targets is defined
         fail_msg: "patch_change / patch_targets missing — run after 02_precheck.yml."
-        quiet: true
+        #quiet: true
+
+    - debug: var=patch_targets
 
     - name: "Snapshot | Nothing to snapshot"
       ansible.builtin.debug:

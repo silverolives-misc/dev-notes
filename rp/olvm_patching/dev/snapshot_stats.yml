@@ -1,0 +1,11 @@
+---
+patch_snapshots:
+  ansible_client:
+    description: ""
+    error: ""
+    snapshot_id: ""
+    status: skipped_test_mode
+    vm: ""
+
+patch_targets:
+  - ansible_client
